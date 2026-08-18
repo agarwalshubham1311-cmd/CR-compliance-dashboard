@@ -1,0 +1,15 @@
+# Secrets — never commit these
+jira.env
+start.ps1
+corporate-ca.crt
+*.crt
+
+# Local data
+compliance.db
+venv/
+__pycache__/
+*.pyc
+
+# OS/editor noise
+.vscode/
+Thumbs.db

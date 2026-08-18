@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>CR Compliance Dashboard</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
+<style>
+  body { font-family: sans-serif; max-width: 1100px; margin: 30px auto; padding: 0 16px; }
+  .cards { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 20px; }
+  .card { background: #f4f4f4; border-radius: 8px; padding: 14px; }
+  .card.danger { background: #fdecea; }
+  .card p.label { font-size: 12px; color: #666; margin: 0 0 4px; }
+  .card p.value { font-size: 22px; font-weight: 600; margin: 0; }
+  .charts { display: flex; gap: 12px; margin-bottom: 20px; }
+  .chart-box { flex: 1; background: #f4f4f4; border-radius: 8px; padding: 12px; position: relative; height: 200px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid #ddd; }
+  th { color: #666; font-weight: 600; }
+  .badge { padding: 2px 8px; border-radius: 6px; font-size: 12px; }
+  .badge-Critical { background: #fdecea; color: #c0392b; }
+  .badge-High { background: #fdf0d9; color: #b5720a; }
+  .badge-Medium { background: #e6f1fb; color: #185fa5; }
+  .badge-Low { background: #eee; color: #555; }
+  button { padding: 5px 10px; font-size: 12px; cursor: pointer; }
+  .toolbar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
+  #status { font-size: 12px; color: #888; }
+</style>
+</head>
+<body>
+
+<div class="toolbar">
+  <h2 style="margin:0;">CR compliance dashboard</h2>
+  <div>
+    <span id="status"></span>
+    <button onclick="refresh()">Refresh now</button>
+  </div>
+</div>
+
+<div class="cards" id="cards"></div>
+
+<div class="charts">
+  <div class="chart-box"><p style="font-size:12px;color:#666;margin:0 0 6px;">Mismatch reasons</p><canvas id="reasonChart"></canvas></div>
+  <div class="chart-box"><p style="font-size:12px;color:#666;margin:0 0 6px;">Compliance rate trend</p><canvas id="trendChart"></canvas></div>
+  <div class="chart-box"><p style="font-size:12px;color:#666;margin:0 0 6px;">Severity distribution</p><canvas id="sevChart"></canvas></div>
+</div>
+
+<table>
+  <thead>
+    <tr>
+      <th>Story</th><th>Story status</th><th>CR</th><th>CR status</th>
+      <th>Reason</th><th>Severity</th><th>Action</th>
+    </tr>
+  </thead>
+  <tbody id="rows"></tbody>
+</table>
+
+<script>
+let reasonChart, trendChart, sevChart;
+
+async function fetchJSON(url, opts) {
+  const r = await fetch(url, opts);
+  return r.json();
+}
+
+async function loadAll() {
+  const [summary, breakdown, trend] = await Promise.all([
+    fetchJSON('/api/dashboard/summary'),
+    fetchJSON('/api/dashboard/breakdown'),
+    fetchJSON('/api/dashboard/trend?days=14'),
+  ]);
+  renderCards(summary);
+  renderTable(summary.active);
+  renderCharts(breakdown, trend);
+  document.getElementById('status').textContent = summary.checked_at
+    ? 'Last scan: ' + new Date(summary.checked_at * 1000).toLocaleString()
+    : 'No scan yet — click Refresh now';
+}
+
+function renderCards(summary) {
+  document.getElementById('cards').innerHTML = `
+    <div class="card"><p class="label">CRs checked</p><p class="value">${summary.crs_checked}</p></div>
+    <div class="card"><p class="label">Stories checked</p><p class="value">${summary.stories_checked}</p></div>
+    <div class="card danger"><p class="label">Non-compliant</p><p class="value">${summary.non_compliant}</p></div>
+    <div class="card"><p class="label">Compliance rate</p><p class="value">${summary.compliance_rate ?? '-'}%</p></div>
+  `;
+}
+
+function renderTable(active) {
+  const rows = document.getElementById('rows');
+  rows.innerHTML = '';
+  if (!active.length) {
+    rows.innerHTML = '<tr><td colspan="7" style="text-align:center;color:#999;padding:20px;">No non-compliant stories.</td></tr>';
+    return;
+  }
+  active.sort((a,b) => b.score - a.score).forEach(d => {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td><a href="https://mastek-team-cuv3mazl.atlassian.net/browse/${d.story_key}" target="_blank">${d.story_key}</a></td>
+      <td>${d.story_status}</td>
+      <td><a href="https://mastek-team-cuv3mazl.atlassian.net/browse/${d.cr_key}" target="_blank">${d.cr_key}</a></td>
+      <td>${d.cr_status}</td>
+      <td>${d.reason}</td>
+      <td><span class="badge badge-${d.severity}">${d.severity}</span></td>
+      <td><button onclick="resolveRow('${d.story_key}','${d.cr_key}')">Mark resolved</button></td>
+    `;
+    rows.appendChild(tr);
+  });
+}
+
+function renderCharts(breakdown, trend) {
+  const reasonLabels = Object.keys(breakdown.by_reason);
+  const reasonData = Object.values(breakdown.by_reason);
+  const sevLabels = ['Critical','High','Medium','Low'];
+  const sevData = sevLabels.map(l => breakdown.by_severity[l] || 0);
+  const trendLabels = trend.map(t => new Date(t.checked_at * 1000).toLocaleDateString());
+  const trendData = trend.map(t => t.compliance_rate);
+
+  if (reasonChart) reasonChart.destroy();
+  if (trendChart) trendChart.destroy();
+  if (sevChart) sevChart.destroy();
+
+  reasonChart = new Chart(document.getElementById('reasonChart'), {
+    type: 'bar',
+    data: { labels: reasonLabels, datasets: [{ data: reasonData, backgroundColor: '#2a78d6', borderRadius: 4 }] },
+    options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } }, scales: { y: { beginAtZero: true, ticks: { precision: 0 } } } }
+  });
+  trendChart = new Chart(document.getElementById('trendChart'), {
+    type: 'line',
+    data: { labels: trendLabels, datasets: [{ data: trendData, borderColor: '#2a78d6', backgroundColor: 'rgba(42,120,214,0.1)', fill: true, tension: 0.3 }] },
+    options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } }, scales: { y: { min: 0, max: 100 } } }
+  });
+  sevChart = new Chart(document.getElementById('sevChart'), {
+    type: 'doughnut',
+    data: { labels: sevLabels, datasets: [{ data: sevData, backgroundColor: ['#e34948','#eda100','#2a78d6','#898781'] }] },
+    options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { position: 'right', labels: { boxWidth: 10, font: { size: 10 } } } } }
+  });
+}
+
+async function resolveRow(story_key, cr_key) {
+  await fetchJSON('/api/dashboard/resolve', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ story_key, cr_key })
+  });
+  loadAll();
+}
+
+async function refresh() {
+  document.getElementById('status').textContent = 'Scanning...';
+  await fetchJSON('/api/dashboard/refresh', { method: 'POST' });
+  loadAll();
+}
+
+loadAll();
+setInterval(loadAll, 60000); // poll every 60s for near-real-time updates
+</script>
+</body>
+</html>

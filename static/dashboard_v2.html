@@ -1,0 +1,318 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>CR Compliance Dashboard</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
+<style>
+  body { font-family: sans-serif; max-width: 1150px; margin: 30px auto; padding: 0 16px; color: #1a1a1a; }
+  .toolbar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+  .version-tag { background: #e6f0fb; color: #185fa5; font-size: 12px; padding: 3px 10px; border-radius: 6px; display: inline-block; margin-bottom: 14px; }
+  #status { font-size: 12px; color: #888; margin-right: 10px; }
+  button { padding: 6px 12px; font-size: 13px; cursor: pointer; border: 1px solid #ccc; background: #fff; border-radius: 6px; }
+  button:hover { background: #f4f4f4; }
+  select { font-size: 13px; padding: 5px 8px; border-radius: 6px; border: 1px solid #ccc; }
+
+  .cards { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 20px; }
+  .card { background: #f4f4f4; border-radius: 8px; padding: 14px; }
+  .card.danger { background: #fdecea; }
+  .card p.label { font-size: 12px; color: #666; margin: 0 0 4px; }
+  .card p.value { font-size: 24px; font-weight: 600; margin: 0; }
+  .card.danger p.value { color: #c0392b; }
+
+  .charts { display: flex; gap: 12px; margin-bottom: 20px; }
+  .chart-box { flex: 1; background: #f4f4f4; border-radius: 8px; padding: 12px; position: relative; height: 190px; }
+  .chart-box p.title { font-size: 13px; color: #666; margin: 0 0 8px; }
+
+  .filters { display: flex; gap: 8px; margin-bottom: 14px; flex-wrap: wrap; }
+
+  .table-wrap { background: #fafafa; border: 1px solid #e0e0e0; border-radius: 10px; overflow: hidden; }
+  .table-header { display: flex; justify-content: space-between; align-items: center; padding: 12px 16px; border-bottom: 1px solid #e0e0e0; }
+  .table-header p { margin: 0; font-size: 15px; font-weight: 600; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; table-layout: fixed; }
+  colgroup col:nth-child(1) { width: 10%; } colgroup col:nth-child(2) { width: 12%; }
+  colgroup col:nth-child(3) { width: 9%; }  colgroup col:nth-child(4) { width: 12%; }
+  colgroup col:nth-child(5) { width: 18%; } colgroup col:nth-child(6) { width: 10%; }
+  colgroup col:nth-child(7) { width: 18%; } colgroup col:nth-child(8) { width: 11%; }
+  th { text-align: left; padding: 8px 12px; color: #666; font-weight: 600; }
+  td { padding: 8px 12px; border-top: 1px solid #eee; }
+  tr.data-row { cursor: pointer; }
+  tr.data-row:hover { background: #f0f4fa; }
+  a.key-link { color: #185fa5; text-decoration: none; }
+  .badge { padding: 2px 8px; border-radius: 6px; font-size: 12px; display: inline-block; }
+  .badge-reason { background: #fdecea; color: #c0392b; }
+  .badge-Critical { background: #fdecea; color: #c0392b; }
+  .badge-High { background: #fdf0d9; color: #b5720a; }
+  .badge-Medium { background: #e6f0fb; color: #185fa5; }
+  .badge-Low { background: #eee; color: #555; }
+  .chevron { color: #999; text-align: right; }
+
+  .detail-row td { background: #f7f7f7; padding: 0; }
+  .detail-inner { padding: 16px 20px; }
+  .detail-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin: 12px 0; font-size: 12px; }
+  .detail-grid span.k { color: #999; }
+  .detail-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .detail-actions a { font-size: 12px; color: #185fa5; text-decoration: none; }
+
+  #draftBox { display: none; background: #fffbe6; border: 1px solid #f0e0a0; border-radius: 8px; padding: 14px; margin: 12px 0 0; }
+  #draftBox textarea { width: 100%; min-height: 80px; font-family: inherit; font-size: 13px; padding: 8px; box-sizing: border-box; }
+  #draftBox .actions { margin-top: 8px; display: flex; gap: 8px; }
+  #draftStatus { font-size: 12px; color: #888; margin: 6px 0 0; }
+  .empty { text-align: center; color: #999; padding: 24px 12px; }
+</style>
+</head>
+<body>
+
+<div class="toolbar">
+  <div><span class="version-tag">v5 · live data</span></div>
+  <div>
+    <span id="status"></span>
+    <button onclick="refresh()">Refresh now</button>
+  </div>
+</div>
+<h2 style="margin:0 0 16px;">CR compliance dashboard</h2>
+
+<div class="cards" id="cards"></div>
+
+<div class="charts">
+  <div class="chart-box"><p class="title">Mismatch reason breakdown</p><canvas id="reasonChart"></canvas></div>
+  <div class="chart-box"><p class="title">Compliance rate trend</p><canvas id="trendChart"></canvas></div>
+</div>
+<div class="charts">
+  <div class="chart-box"><p class="title">Severity distribution</p><canvas id="sevChart"></canvas></div>
+  <div class="chart-box"><p class="title">Mismatches by CR</p><canvas id="crChart"></canvas></div>
+</div>
+
+<div class="filters">
+  <select id="reasonFilter"><option value="all">All reasons</option></select>
+  <select id="sevFilter">
+    <option value="all">All severities</option>
+    <option value="Critical">Critical</option>
+    <option value="High">High</option>
+    <option value="Medium">Medium</option>
+    <option value="Low">Low</option>
+  </select>
+</div>
+
+<div class="table-wrap">
+  <div class="table-header"><p>Non-compliant stories</p></div>
+  <table>
+    <colgroup><col><col><col><col><col><col><col><col></colgroup>
+    <thead>
+      <tr>
+        <th>Story</th><th>Story status</th><th>CR</th><th>CR status</th>
+        <th>Reason</th><th id="sevHeader" style="cursor:pointer;">Severity ⇅</th><th>Actions</th><th></th>
+      </tr>
+    </thead>
+    <tbody id="rows"></tbody>
+  </table>
+</div>
+
+<div id="draftBox">
+  <p style="font-size:12px;color:#886;margin:0 0 6px;">AI-drafted comment for <b id="draftFor"></b> — review before posting</p>
+  <textarea id="draftText"></textarea>
+  <div class="actions">
+    <button onclick="postDraft()">Post to Jira</button>
+    <button onclick="closeDraft()">Discard</button>
+  </div>
+  <p id="draftStatus"></p>
+</div>
+
+<script>
+let reasonChart, trendChart, sevChart, crChart;
+let lastActive = [];
+let sortAsc = false;
+let expandedKey = null;
+let currentDraftStoryKey = null;
+
+async function fetchJSON(url, opts) {
+  const r = await fetch(url, opts);
+  return r.json();
+}
+
+async function loadAll() {
+  const [summary, breakdown, trend] = await Promise.all([
+    fetchJSON('/api/dashboard/summary'),
+    fetchJSON('/api/dashboard/breakdown'),
+    fetchJSON('/api/dashboard/trend?days=14'),
+  ]);
+  lastActive = summary.active || [];
+  renderCards(summary);
+  renderCharts(breakdown, trend);
+  populateReasonFilter(lastActive);
+  renderTable();
+  document.getElementById('status').textContent = summary.checked_at
+    ? 'Last scan: ' + new Date(summary.checked_at * 1000).toLocaleString()
+    : 'No scan yet';
+}
+
+function renderCards(summary) {
+  document.getElementById('cards').innerHTML = `
+    <div class="card"><p class="label">CRs checked</p><p class="value">${summary.crs_checked}</p></div>
+    <div class="card"><p class="label">Stories checked</p><p class="value">${summary.stories_checked}</p></div>
+    <div class="card danger"><p class="label">Non-compliant</p><p class="value">${summary.non_compliant}</p></div>
+    <div class="card"><p class="label">Compliance rate</p><p class="value">${summary.compliance_rate ?? '-'}%</p></div>
+  `;
+}
+
+function populateReasonFilter(active) {
+  const sel = document.getElementById('reasonFilter');
+  const current = sel.value;
+  const reasons = [...new Set(active.map(d => d.reason))];
+  sel.innerHTML = '<option value="all">All reasons</option>' +
+    reasons.map(r => `<option value="${r}">${r}</option>`).join('');
+  if (reasons.includes(current)) sel.value = current;
+}
+
+function renderCharts(breakdown, trend) {
+  const reasonLabels = Object.keys(breakdown.by_reason);
+  const reasonData = Object.values(breakdown.by_reason);
+  const sevLabels = ['Critical','High','Medium','Low'];
+  const sevData = sevLabels.map(l => breakdown.by_severity[l] || 0);
+  const crLabels = Object.keys(breakdown.by_cr);
+  const crData = Object.values(breakdown.by_cr);
+  const trendLabels = trend.map(t => new Date(t.checked_at * 1000).toLocaleDateString());
+  const trendData = trend.map(t => t.compliance_rate);
+
+  if (reasonChart) reasonChart.destroy();
+  if (trendChart) trendChart.destroy();
+  if (sevChart) sevChart.destroy();
+  if (crChart) crChart.destroy();
+
+  reasonChart = new Chart(document.getElementById('reasonChart'), {
+    type: 'bar',
+    data: { labels: reasonLabels, datasets: [{ data: reasonData, backgroundColor: '#2a78d6', borderRadius: 4, maxBarThickness: 30 }] },
+    options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } }, scales: { y: { beginAtZero: true, ticks: { precision: 0 } } } }
+  });
+  trendChart = new Chart(document.getElementById('trendChart'), {
+    type: 'line',
+    data: { labels: trendLabels, datasets: [{ data: trendData, borderColor: '#2a78d6', backgroundColor: 'rgba(42,120,214,0.1)', fill: true, tension: 0.3, pointRadius: 3 }] },
+    options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } }, scales: { y: { min: 0, max: 100, ticks: { callback: v => v + '%' } } } }
+  });
+  sevChart = new Chart(document.getElementById('sevChart'), {
+    type: 'doughnut',
+    data: { labels: sevLabels, datasets: [{ data: sevData, backgroundColor: ['#e34948','#eda100','#2a78d6','#898781'] }] },
+    options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { position: 'right', labels: { boxWidth: 10, font: { size: 11 } } } } }
+  });
+  crChart = new Chart(document.getElementById('crChart'), {
+    type: 'bar',
+    data: { labels: crLabels, datasets: [{ data: crData, backgroundColor: '#4a3aa7', borderRadius: 4, maxBarThickness: 18 }] },
+    options: { indexAxis: 'y', responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } }, scales: { x: { beginAtZero: true, ticks: { precision: 0 } } } }
+  });
+}
+
+function renderTable() {
+  const reasonVal = document.getElementById('reasonFilter').value;
+  const sevVal = document.getElementById('sevFilter').value;
+
+  let filtered = lastActive
+    .filter(d => (reasonVal === 'all' || d.reason === reasonVal) && (sevVal === 'all' || d.severity === sevVal))
+    .sort((a, b) => sortAsc ? a.score - b.score : b.score - a.score);
+
+  const rows = document.getElementById('rows');
+  rows.innerHTML = '';
+
+  if (filtered.length === 0) {
+    rows.innerHTML = '<tr><td colspan="8" class="empty">No mismatches match these filters.</td></tr>';
+    return;
+  }
+
+  filtered.forEach(d => {
+    const tr = document.createElement('tr');
+    tr.className = 'data-row';
+    tr.innerHTML = `
+      <td><a class="key-link" href="https://mastek-team-cuv3mazl.atlassian.net/browse/${d.story_key}" target="_blank" onclick="event.stopPropagation()">${d.story_key}</a></td>
+      <td>${d.story_status}</td>
+      <td><a class="key-link" href="https://mastek-team-cuv3mazl.atlassian.net/browse/${d.cr_key}" target="_blank" onclick="event.stopPropagation()">${d.cr_key}</a></td>
+      <td>${d.cr_status}</td>
+      <td><span class="badge badge-reason">${d.reason}</span></td>
+      <td><span class="badge badge-${d.severity}">${d.severity}</span></td>
+      <td>
+        <button onclick="event.stopPropagation();resolveRow('${d.story_key}','${d.cr_key}')">Resolve</button>
+        <button onclick="event.stopPropagation();draftComment('${d.story_key}','${d.cr_key}')">Draft</button>
+      </td>
+      <td class="chevron">${expandedKey === d.story_key ? '▾' : '▸'}</td>
+    `;
+    tr.addEventListener('click', () => { expandedKey = expandedKey === d.story_key ? null : d.story_key; renderTable(); });
+    rows.appendChild(tr);
+
+    if (expandedKey === d.story_key) {
+      const detail = document.createElement('tr');
+      detail.className = 'detail-row';
+      detail.innerHTML = `<td colspan="8"><div class="detail-inner">
+        <div class="detail-grid">
+          <div><span class="k">Reason</span><br>${d.reason}</div>
+          <div><span class="k">Severity score</span><br>${d.score} pts</div>
+          <div><span class="k">Checked</span><br>${new Date(d.checked_at * 1000).toLocaleString()}</div>
+        </div>
+        <div class="detail-actions">
+          <button onclick="event.stopPropagation();draftComment('${d.story_key}','${d.cr_key}')">Draft comment</button>
+          <button onclick="event.stopPropagation();resolveRow('${d.story_key}','${d.cr_key}')">Mark resolved</button>
+          <a href="https://mastek-team-cuv3mazl.atlassian.net/browse/${d.story_key}" target="_blank">Open in Jira ↗</a>
+        </div>
+      </div></td>`;
+      rows.appendChild(detail);
+    }
+  });
+}
+
+document.getElementById('reasonFilter').addEventListener('change', renderTable);
+document.getElementById('sevFilter').addEventListener('change', renderTable);
+document.getElementById('sevHeader').addEventListener('click', () => { sortAsc = !sortAsc; renderTable(); });
+
+async function resolveRow(story_key, cr_key) {
+  await fetchJSON('/api/dashboard/resolve', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ story_key, cr_key })
+  });
+  loadAll();
+}
+
+async function draftComment(story_key, cr_key) {
+  const box = document.getElementById('draftBox');
+  document.getElementById('draftFor').textContent = story_key;
+  document.getElementById('draftText').value = 'Generating draft with local LLM...';
+  document.getElementById('draftStatus').textContent = '';
+  box.style.display = 'block';
+  currentDraftStoryKey = story_key;
+
+  const result = await fetchJSON('/api/ai/draft-comment', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ story_key, cr_key })
+  });
+
+  if (result.error) {
+    document.getElementById('draftText').value = '';
+    document.getElementById('draftStatus').textContent = 'Error: ' + result.error;
+  } else {
+    document.getElementById('draftText').value = result.draft;
+  }
+}
+
+async function postDraft() {
+  const comment = document.getElementById('draftText').value;
+  document.getElementById('draftStatus').textContent = 'Posting...';
+  const result = await fetchJSON('/api/ai/post-comment', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ story_key: currentDraftStoryKey, comment })
+  });
+  document.getElementById('draftStatus').textContent = result.error
+    ? 'Error: ' + result.error
+    : 'Posted to ' + currentDraftStoryKey + ' ✓';
+}
+
+function closeDraft() {
+  document.getElementById('draftBox').style.display = 'none';
+}
+
+async function refresh() {
+  document.getElementById('status').textContent = 'Scanning...';
+  await fetchJSON('/api/dashboard/refresh', { method: 'POST' });
+  loadAll();
+}
+
+loadAll();
+setInterval(loadAll, 60000);
+</script>
+</body>
+</html>

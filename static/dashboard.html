@@ -1,0 +1,479 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Compliance Dashboard</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
+<style>
+  body { font-family: sans-serif; max-width: 1150px; margin: 30px auto; padding: 0 16px; color: #1a1a1a; }
+  .toolbar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+  .version-tag { background: #e6f0fb; color: #185fa5; font-size: 12px; padding: 3px 10px; border-radius: 6px; display: inline-block; margin-bottom: 14px; }
+  #status { font-size: 12px; color: #888; margin-right: 10px; }
+  button { padding: 6px 12px; font-size: 13px; cursor: pointer; border: 1px solid #ccc; background: #fff; border-radius: 6px; }
+  button:hover { background: #f4f4f4; }
+  select { font-size: 13px; padding: 5px 8px; border-radius: 6px; border: 1px solid #ccc; }
+
+  .tabs { display: flex; gap: 4px; border-bottom: 1px solid #e0e0e0; margin-bottom: 20px; }
+  .tabbtn { border: none; border-radius: 0; background: none; padding: 10px 16px; font-size: 14px; color: #666; border-bottom: 2px solid transparent; }
+  .tabbtn:hover { background: none; color: #185fa5; }
+  .tabbtn.active { color: #185fa5; border-bottom: 2px solid #185fa5; }
+  .tabbtn .count { font-size: 11px; padding: 1px 6px; border-radius: 8px; margin-left: 4px; background: #eee; color: #666; }
+  .tabbtn.active .count { background: #fdecea; color: #c0392b; }
+
+  .cards { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 20px; }
+  .card { background: #f4f4f4; border-radius: 8px; padding: 14px; }
+  .card.danger { background: #fdecea; }
+  .card p.label { font-size: 12px; color: #666; margin: 0 0 4px; }
+  .card p.value { font-size: 24px; font-weight: 600; margin: 0; }
+  .card.danger p.value { color: #c0392b; }
+
+  .charts { display: flex; gap: 12px; margin-bottom: 20px; }
+  .chart-box { flex: 1; background: #f4f4f4; border-radius: 8px; padding: 12px; position: relative; height: 190px; }
+  .chart-box p.title { font-size: 13px; color: #666; margin: 0 0 8px; }
+
+  .filters { display: flex; gap: 8px; margin-bottom: 14px; flex-wrap: wrap; }
+
+  .table-wrap { background: #fafafa; border: 1px solid #e0e0e0; border-radius: 10px; overflow: hidden; }
+  .table-header { display: flex; justify-content: space-between; align-items: center; padding: 12px 16px; border-bottom: 1px solid #e0e0e0; }
+  .table-header p { margin: 0; font-size: 15px; font-weight: 600; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; table-layout: fixed; }
+  th { text-align: left; padding: 8px 12px; color: #666; font-weight: 600; }
+  td { padding: 8px 12px; border-top: 1px solid #eee; }
+  tr.data-row { cursor: pointer; }
+  tr.data-row:hover { background: #f0f4fa; }
+  a.key-link { color: #185fa5; text-decoration: none; }
+  .badge { padding: 2px 8px; border-radius: 6px; font-size: 12px; display: inline-block; }
+  .badge-reason { background: #fdecea; color: #c0392b; }
+  .badge-Critical { background: #fdecea; color: #c0392b; }
+  .badge-High { background: #fdf0d9; color: #b5720a; }
+  .badge-Medium { background: #e6f0fb; color: #185fa5; }
+  .badge-Low { background: #eee; color: #555; }
+  .chevron { color: #999; text-align: right; }
+
+  .detail-row td { background: #f7f7f7; padding: 0; }
+  .detail-inner { padding: 16px 20px; }
+  .detail-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin: 12px 0; font-size: 12px; }
+  .detail-grid span.k { color: #999; }
+  .detail-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .detail-actions a { font-size: 12px; color: #185fa5; text-decoration: none; }
+
+  #draftBox { display: none; background: #fffbe6; border: 1px solid #f0e0a0; border-radius: 8px; padding: 14px; margin: 12px 0 0; }
+  #draftBox textarea { width: 100%; min-height: 80px; font-family: inherit; font-size: 13px; padding: 8px; box-sizing: border-box; }
+  #draftBox .actions { margin-top: 8px; display: flex; gap: 8px; }
+  #draftStatus { font-size: 12px; color: #888; margin: 6px 0 0; }
+  .empty { text-align: center; color: #999; padding: 24px 12px; }
+</style>
+</head>
+<body>
+
+<div class="toolbar">
+  <div><span class="version-tag">v6 · four-way live data</span></div>
+  <div>
+    <span id="status"></span>
+    <button onclick="refresh()">Refresh now</button>
+  </div>
+</div>
+<h2 style="margin:0 0 16px;">Compliance dashboard</h2>
+
+<div class="tabs" id="tabs">
+  <button class="tabbtn active" data-tab="epic">Epic <span class="count" id="count-epic">0</span></button>
+  <button class="tabbtn" data-tab="cr">CR <span class="count" id="count-cr">0</span></button>
+  <button class="tabbtn" data-tab="story">Story <span class="count" id="count-story">0</span></button>
+  <button class="tabbtn" data-tab="outcome">Outcome <span class="count" id="count-outcome">0</span></button>
+</div>
+
+<div class="cards" id="cards"></div>
+
+<div class="charts">
+  <div class="chart-box"><p class="title" id="chart1title">Breakdown</p><canvas id="chart1"></canvas></div>
+  <div class="chart-box"><p class="title">Severity distribution</p><canvas id="chart2"></canvas></div>
+</div>
+
+<div class="filters">
+  <select id="reasonFilter"><option value="all">All reasons</option></select>
+  <select id="sevFilter">
+    <option value="all">All severities</option>
+    <option value="Critical">Critical</option>
+    <option value="High">High</option>
+    <option value="Medium">Medium</option>
+    <option value="Low">Low</option>
+  </select>
+</div>
+
+<div class="table-wrap">
+  <div class="table-header"><p id="tableTitle">Non-compliant items</p></div>
+  <table>
+    <colgroup id="colgroup"></colgroup>
+    <thead><tr id="headRow"></tr></thead>
+    <tbody id="rows"></tbody>
+  </table>
+</div>
+
+<div id="draftBox">
+  <p style="font-size:12px;color:#886;margin:0 0 6px;">AI-drafted comment for <b id="draftFor"></b> — review before posting</p>
+  <textarea id="draftText"></textarea>
+  <div class="actions">
+    <button onclick="postDraft()">Post to Jira</button>
+    <button onclick="closeDraft()">Discard</button>
+  </div>
+  <p id="draftStatus"></p>
+</div>
+
+<script>
+const JIRA_BASE = "https://mastek-team-cuv3mazl.atlassian.net/browse/";
+let chart1, chart2;
+let sortAsc = false;
+let expandedKey = null;
+let currentDraftStoryKey = null;
+let currentTab = "epic";
+let tabData = { epic: [], cr: [], story: [], outcome: [] };
+
+// Per-tab config: how to fetch, what columns to show, how to label things.
+const TABS = {
+  epic: {
+    columns: ["Epic", "Epic status", "Bottleneck CR", "CR status", "Reason", "Severity"],
+    getRows: d => ({ left_key: d.story_key, left_status: d.story_status, right_key: d.cr_key, right_status: d.cr_status, reason: d.reason, severity: d.severity, score: d.score }),
+    hasActions: false,
+  },
+  cr: {
+    columns: ["CR", "Status", "Severity", "Issues"],
+    fieldTab: true,
+    hasActions: false,
+  },
+  story: {
+    columns: ["Story", "Story status", "CR", "CR status", "Reason", "Severity"],
+    getRows: d => ({ left_key: d.story_key, left_status: d.story_status, right_key: d.cr_key, right_status: d.cr_status, reason: d.reason, severity: d.severity, score: d.score }),
+    hasActions: true,
+  },
+  outcome: {
+    columns: ["Story", "Story status", "Outcome", "Outcome status", "Reason", "Severity"],
+    getRows: d => ({ left_key: d.cr_key, left_status: d.cr_status, right_key: d.story_key, right_status: d.story_status, reason: d.reason, severity: d.severity, score: d.score }),
+    hasActions: false,
+  },
+};
+
+async function fetchJSON(url, opts) {
+  const r = await fetch(url, opts);
+  return r.json();
+}
+
+async function loadAll() {
+  const [summary, epicRows, outcomeRows, crFindings, outcomeFindings] = await Promise.all([
+    fetchJSON('/api/dashboard/summary'),
+    fetchJSON('/api/pairs/epic-cr'),
+    fetchJSON('/api/pairs/story-outcome'),
+    fetchJSON('/api/fields/findings?entity_type=cr'),
+    fetchJSON('/api/fields/findings?entity_type=outcome'),
+  ]);
+
+  tabData.story = summary.active || [];
+  tabData.epic = Array.isArray(epicRows) ? epicRows : [];
+  tabData.outcome = Array.isArray(outcomeRows) ? outcomeRows : [];
+  tabData.cr = Array.isArray(crFindings) ? crFindings : [];
+  tabData._outcomeFindings = Array.isArray(outcomeFindings) ? outcomeFindings : [];
+
+  document.getElementById('count-epic').textContent = tabData.epic.length;
+  document.getElementById('count-cr').textContent = new Set(tabData.cr.map(f => f.entity_key)).size;
+  document.getElementById('count-story').textContent = tabData.story.length;
+  document.getElementById('count-outcome').textContent = tabData.outcome.length;
+
+  document.getElementById('status').textContent = summary.checked_at
+    ? 'Last scan: ' + new Date(summary.checked_at * 1000).toLocaleString()
+    : 'No scan yet';
+
+  renderTab();
+}
+
+function switchTab(tab) {
+  currentTab = tab;
+  expandedKey = null;
+  document.querySelectorAll('.tabbtn').forEach(b => b.classList.toggle('active', b.dataset.tab === tab));
+  renderTab();
+}
+document.querySelectorAll('.tabbtn').forEach(b => b.addEventListener('click', () => switchTab(b.dataset.tab)));
+
+function renderTab() {
+  const cfg = TABS[currentTab];
+  document.getElementById('tableTitle').textContent = 'Non-compliant ' + currentTab + 's';
+
+  // Header row + colgroup
+  const headRow = document.getElementById('headRow');
+  const colgroup = document.getElementById('colgroup');
+  headRow.innerHTML = '';
+  colgroup.innerHTML = '';
+  const widths = cfg.hasActions ? [12, 16, 12, 16, 24, 12, 8] : (cfg.fieldTab ? [16, 20, 14, 40] : [14, 16, 14, 16, 26, 14]);
+  const cols = cfg.hasActions ? [...cfg.columns, 'Actions'] : cfg.columns;
+  cols.forEach((c, i) => {
+    const th = document.createElement('th');
+    th.textContent = c;
+    if (c === 'Severity') { th.style.cursor = 'pointer'; th.id = 'sevHeader'; th.textContent = 'Severity ⇅'; }
+    headRow.appendChild(th);
+    const col = document.createElement('col');
+    col.style.width = (widths[i] || 10) + '%';
+    colgroup.appendChild(col);
+  });
+  if (!cfg.hasActions) {
+    const th = document.createElement('th');
+    headRow.appendChild(th);
+  }
+  const sevHeader = document.getElementById('sevHeader');
+  if (sevHeader) sevHeader.addEventListener('click', () => { sortAsc = !sortAsc; renderRows(); });
+
+  populateFilters();
+  renderCards();
+  renderCharts();
+  renderRows();
+}
+
+function populateFilters() {
+  const cfg = TABS[currentTab];
+  const sel = document.getElementById('reasonFilter');
+  let values;
+  if (cfg.fieldTab) {
+    values = [...new Set(tabData[currentTab].map(f => f.field).filter(Boolean))];
+  } else {
+    values = [...new Set(tabData[currentTab].map(cfg.getRows).map(r => r.reason).filter(Boolean))];
+  }
+  const current = sel.value;
+  sel.innerHTML = '<option value="all">All reasons</option>' + values.map(v => `<option value="${v}">${v}</option>`).join('');
+  if (values.includes(current)) sel.value = current;
+}
+
+function renderCards() {
+  const cfg = TABS[currentTab];
+  const data = tabData[currentTab];
+  let checked, nonCompliant, critHigh, rate;
+
+  if (cfg.fieldTab) {
+    const entities = new Set(data.map(f => f.entity_key));
+    checked = entities.size;
+    nonCompliant = entities.size;
+    critHigh = data.filter(f => f.severity === 'High').length;
+    rate = '-';
+  } else {
+    const rows = data.map(cfg.getRows);
+    checked = rows.length;
+    nonCompliant = rows.length;
+    critHigh = rows.filter(r => r.severity === 'Critical' || r.severity === 'High').length;
+    rate = '-';
+  }
+
+  document.getElementById('cards').innerHTML = `
+    <div class="card"><p class="label">${cfg.fieldTab ? 'Entities with issues' : 'Checked'}</p><p class="value">${checked}</p></div>
+    <div class="card danger"><p class="label">Non-compliant</p><p class="value">${nonCompliant}</p></div>
+    <div class="card"><p class="label">Critical/High</p><p class="value">${critHigh}</p></div>
+    <div class="card"><p class="label">Total findings</p><p class="value">${data.length}</p></div>
+  `;
+}
+
+function renderCharts() {
+  const cfg = TABS[currentTab];
+  const data = tabData[currentTab];
+  let breakdownLabels, breakdownData, sevData;
+
+  if (cfg.fieldTab) {
+    const byField = {};
+    data.forEach(f => { byField[f.field] = (byField[f.field] || 0) + 1; });
+    breakdownLabels = Object.keys(byField);
+    breakdownData = Object.values(byField);
+    const sevCounts = { Critical: 0, High: 0, Medium: 0, Low: 0 };
+    data.forEach(f => { if (sevCounts[f.severity] !== undefined) sevCounts[f.severity]++; });
+    sevData = Object.values(sevCounts);
+    document.getElementById('chart1title').textContent = 'Findings by field';
+  } else {
+    const rows = data.map(cfg.getRows);
+    const byReason = {};
+    rows.forEach(r => { byReason[r.reason] = (byReason[r.reason] || 0) + 1; });
+    breakdownLabels = Object.keys(byReason);
+    breakdownData = Object.values(byReason);
+    const sevCounts = { Critical: 0, High: 0, Medium: 0, Low: 0 };
+    rows.forEach(r => { if (sevCounts[r.severity] !== undefined) sevCounts[r.severity]++; });
+    sevData = Object.values(sevCounts);
+    document.getElementById('chart1title').textContent = 'Reason breakdown';
+  }
+
+  if (chart1) chart1.destroy();
+  if (chart2) chart2.destroy();
+
+  chart1 = new Chart(document.getElementById('chart1'), {
+    type: 'bar',
+    data: { labels: breakdownLabels, datasets: [{ data: breakdownData, backgroundColor: '#2a78d6', borderRadius: 4 }] },
+    options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } }, scales: { y: { beginAtZero: true, ticks: { precision: 0 } } } }
+  });
+  chart2 = new Chart(document.getElementById('chart2'), {
+    type: 'doughnut',
+    data: { labels: ['Critical','High','Medium','Low'], datasets: [{ data: sevData, backgroundColor: ['#e34948','#eda100','#2a78d6','#898781'] }] },
+    options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { position: 'right', labels: { boxWidth: 10, font: { size: 11 } } } } }
+  });
+}
+
+function renderRows() {
+  const cfg = TABS[currentTab];
+  const reasonVal = document.getElementById('reasonFilter').value;
+  const sevVal = document.getElementById('sevFilter').value;
+  const rows = document.getElementById('rows');
+  rows.innerHTML = '';
+
+  if (cfg.fieldTab) {
+    let filtered = tabData[currentTab]
+      .filter(f => (reasonVal === 'all' || f.field === reasonVal) && (sevVal === 'all' || f.severity === sevVal));
+
+    if (filtered.length === 0) {
+      rows.innerHTML = `<tr><td colspan="5" class="empty">No findings match these filters.</td></tr>`;
+      return;
+    }
+
+    // Group findings by entity (CR/Outcome key) instead of one row per field
+    const rank = { Critical: 3, High: 2, Medium: 1, Low: 0 };
+    const groups = {};
+    filtered.forEach(f => {
+      if (!groups[f.entity_key]) {
+        groups[f.entity_key] = { key: f.entity_key, status: f.entity_status, findings: [], maxRank: 0 };
+      }
+      groups[f.entity_key].findings.push(f);
+      groups[f.entity_key].maxRank = Math.max(groups[f.entity_key].maxRank, rank[f.severity] || 0);
+    });
+    const groupList = Object.values(groups).sort((a, b) => sortAsc ? a.maxRank - b.maxRank : b.maxRank - a.maxRank);
+    const sevLabel = { 3: 'Critical', 2: 'High', 1: 'Medium', 0: 'Low' };
+
+    groupList.forEach(g => {
+      const tr = document.createElement('tr');
+      tr.className = 'data-row';
+      tr.innerHTML = `
+        <td style="padding:8px 12px;"><a class="key-link" href="${JIRA_BASE}${g.key}" target="_blank" onclick="event.stopPropagation()">${g.key}</a></td>
+        <td style="padding:8px 12px;">${g.status || '-'}</td>
+        <td style="padding:8px 12px;"><span class="badge badge-${sevLabel[g.maxRank]}">${sevLabel[g.maxRank]}</span></td>
+        <td style="padding:8px 12px;color:#666;" colspan="2">${g.findings.length} issue${g.findings.length > 1 ? 's' : ''}</td>
+        <td style="padding:8px 12px;color:#999;text-align:right;">${expandedKey === g.key ? '▾' : '▸'}</td>
+      `;
+      tr.addEventListener('click', () => { expandedKey = expandedKey === g.key ? null : g.key; renderRows(); });
+      rows.appendChild(tr);
+
+      if (expandedKey === g.key) {
+        const detail = document.createElement('tr');
+        detail.className = 'detail-row';
+        const issueRows = g.findings.map(f => `
+          <div style="display:flex;align-items:center;gap:12px;padding:8px 0;border-top:1px solid #e6e6e6;font-size:13px;">
+            <span style="width:240px;flex-shrink:0;font-weight:500;">${f.field || '-'}</span>
+            <span style="color:${f.check_name === 'overdue' || f.check_name === 'go_live_overdue' ? '#c0392b' : '#888'};flex:1;">${f.message}</span>
+          </div>
+        `).join('');
+        detail.innerHTML = `<td colspan="6"><div style="padding:4px 20px 16px 44px;">${issueRows}</div></td>`;
+        rows.appendChild(detail);
+      }
+    });
+    return;
+  }
+
+  let filtered = tabData[currentTab].map(cfg.getRows)
+    .filter(r => (reasonVal === 'all' || r.reason === reasonVal) && (sevVal === 'all' || r.severity === sevVal))
+    .sort((a, b) => sortAsc ? (a.score||0) - (b.score||0) : (b.score||0) - (a.score||0));
+
+  if (filtered.length === 0) {
+    const colspan = cfg.hasActions ? 7 : 6;
+    rows.innerHTML = `<tr><td colspan="${colspan}" class="empty">No mismatches match these filters.</td></tr>`;
+    return;
+  }
+
+  filtered.forEach(d => {
+    const tr = document.createElement('tr');
+    tr.className = 'data-row';
+    let actionCell = '';
+    if (cfg.hasActions) {
+      actionCell = `<td style="padding:8px 12px;">
+        <button onclick="event.stopPropagation();resolveRow('${d.left_key}','${d.right_key}')">Resolve</button>
+        <button onclick="event.stopPropagation();draftComment('${d.left_key}','${d.right_key}')">Draft</button>
+      </td>`;
+    }
+    tr.innerHTML = `
+      <td style="padding:8px 12px;"><a class="key-link" href="${JIRA_BASE}${d.left_key}" target="_blank" onclick="event.stopPropagation()">${d.left_key}</a></td>
+      <td style="padding:8px 12px;">${d.left_status}</td>
+      <td style="padding:8px 12px;"><a class="key-link" href="${JIRA_BASE}${d.right_key}" target="_blank" onclick="event.stopPropagation()">${d.right_key}</a></td>
+      <td style="padding:8px 12px;">${d.right_status}</td>
+      <td style="padding:8px 12px;"><span class="badge badge-reason">${d.reason}</span></td>
+      <td style="padding:8px 12px;"><span class="badge badge-${d.severity}">${d.severity}</span></td>
+      ${actionCell}
+      <td style="padding:8px 12px;color:#999;text-align:right;">${expandedKey === d.left_key ? '▾' : '▸'}</td>
+    `;
+    tr.addEventListener('click', () => { expandedKey = expandedKey === d.left_key ? null : d.left_key; renderRows(); });
+    rows.appendChild(tr);
+
+    if (expandedKey === d.left_key) {
+      const colspan = cfg.hasActions ? 7 : 6;
+      const detail = document.createElement('tr');
+      detail.className = 'detail-row';
+      detail.innerHTML = `<td colspan="${colspan}"><div class="detail-inner">
+        <div class="detail-grid">
+          <div><span class="k">Reason</span><br>${d.reason}</div>
+          <div><span class="k">Severity score</span><br>${d.score || 0} pts</div>
+        </div>
+        <div class="detail-actions">
+          ${cfg.hasActions ? `<button onclick="event.stopPropagation();draftComment('${d.left_key}','${d.right_key}')">Draft comment</button>
+          <button onclick="event.stopPropagation();resolveRow('${d.left_key}','${d.right_key}')">Mark resolved</button>` : ''}
+          <a href="${JIRA_BASE}${d.left_key}" target="_blank">Open in Jira ↗</a>
+        </div>
+      </div></td>`;
+      rows.appendChild(detail);
+    }
+  });
+}
+
+document.getElementById('reasonFilter').addEventListener('change', renderRows);
+document.getElementById('sevFilter').addEventListener('change', renderRows);
+
+async function resolveRow(story_key, cr_key) {
+  await fetchJSON('/api/dashboard/resolve', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ story_key, cr_key })
+  });
+  loadAll();
+}
+
+async function draftComment(story_key, cr_key) {
+  const box = document.getElementById('draftBox');
+  document.getElementById('draftFor').textContent = story_key;
+  document.getElementById('draftText').value = 'Generating draft with local LLM...';
+  document.getElementById('draftStatus').textContent = '';
+  box.style.display = 'block';
+  currentDraftStoryKey = story_key;
+
+  const result = await fetchJSON('/api/ai/draft-comment', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ story_key, cr_key })
+  });
+
+  if (result.error) {
+    document.getElementById('draftText').value = '';
+    document.getElementById('draftStatus').textContent = 'Error: ' + result.error;
+  } else {
+    document.getElementById('draftText').value = result.draft;
+  }
+}
+
+async function postDraft() {
+  const comment = document.getElementById('draftText').value;
+  document.getElementById('draftStatus').textContent = 'Posting...';
+  const result = await fetchJSON('/api/ai/post-comment', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ story_key: currentDraftStoryKey, comment })
+  });
+  document.getElementById('draftStatus').textContent = result.error
+    ? 'Error: ' + result.error
+    : 'Posted to ' + currentDraftStoryKey + ' ✓';
+}
+
+function closeDraft() {
+  document.getElementById('draftBox').style.display = 'none';
+}
+
+async function refresh() {
+  document.getElementById('status').textContent = 'Scanning...';
+  await fetchJSON('/api/dashboard/refresh', { method: 'POST' });
+  loadAll();
+}
+
+loadAll();
+setInterval(loadAll, 60000);
+</script>
+</body>
+</html>
