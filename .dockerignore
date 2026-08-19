@@ -1,0 +1,12 @@
+venv/
+__pycache__/
+*.pyc
+compliance.db
+jira.env
+.env
+start.ps1
+.git/
+.gitignore
+docker-compose.yml
+Dockerfile.jira-mcp
+Dockerfile.ollama

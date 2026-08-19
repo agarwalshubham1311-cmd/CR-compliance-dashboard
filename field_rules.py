@@ -27,6 +27,19 @@ OUTCOME_FIELDS = {
     "go_live_date": "customfield_10116",
 }
 
+# Epic fields confirmed to exist (native Jira fields + the shared Target Delivery
+# Date custom field already confirmed for CR/Outcome). "PI" and "Delivery Data
+# Confidence" are NOT yet included — their customfield IDs haven't been confirmed
+# against a real Epic issue yet (same discovery step used for every other field:
+# GET /rest/api/3/issue/<EPIC-KEY>?expand=names, search the "names" block).
+EPIC_FIELDS = {
+    "due_date": "duedate",
+    "target_delivery_date": "customfield_10112",
+    "description": "description",
+    "labels": "labels",
+    "priority": "priority",
+}
+
 # Statuses past which "overdue date" checks no longer apply — a delivered
 # item with a target date in the past isn't overdue, it's just history.
 TERMINAL_STATUSES_CR = {"DELIVERY COMPLETE"}
@@ -104,6 +117,63 @@ def check_cr_fields(fields, status_name):
     if not is_blocked and blocked_by:
         findings.append({"check": "blocked_reason_unexpected", "field": "Blocked by/Dependency", "severity": "Low",
                           "message": "Blocked by/Dependency is set but status is not Blocked/On Hold"})
+
+    return findings
+
+
+def _description_text(raw):
+    """Jira's native description field is Atlassian Document Format (nested
+    JSON), not a plain string. Extract whether there's any actual text in it."""
+    if not raw or not isinstance(raw, dict):
+        return None
+    texts = []
+
+    def _walk(node):
+        if isinstance(node, dict):
+            if node.get("type") == "text" and node.get("text"):
+                texts.append(node["text"])
+            for child in node.get("content", []):
+                _walk(child)
+        elif isinstance(node, list):
+            for item in node:
+                _walk(item)
+
+    _walk(raw)
+    joined = " ".join(texts).strip()
+    return joined or None
+
+
+def check_epic_fields(fields, status_name):
+    findings = []
+
+    due_date = _value(fields, EPIC_FIELDS["due_date"])
+    if due_date is None:
+        findings.append({"check": "missing_field", "field": "Due Date", "severity": "Low",
+                          "message": "Due Date is not set"})
+
+    target = _value(fields, EPIC_FIELDS["target_delivery_date"])
+    if target is None:
+        findings.append({"check": "missing_field", "field": "Target Delivery Date", "severity": "Low",
+                          "message": "Target Delivery Date is not set"})
+
+    desc_text = _description_text(fields.get(EPIC_FIELDS["description"]))
+    if not desc_text:
+        findings.append({"check": "missing_field", "field": "Description", "severity": "Low",
+                          "message": "Description is empty"})
+
+    labels = fields.get(EPIC_FIELDS["labels"])
+    if not labels:
+        findings.append({"check": "missing_field", "field": "Labels", "severity": "Low",
+                          "message": "No labels set"})
+
+    priority = _value(fields, EPIC_FIELDS["priority"])
+    if priority is None:
+        findings.append({"check": "missing_field", "field": "Priority", "severity": "Low",
+                          "message": "Priority is not set"})
+
+    # PI and Delivery Data Confidence intentionally not checked yet —
+    # customfield IDs not confirmed. Add to EPIC_FIELDS above once known,
+    # then add the same missing_field check pattern here.
 
     return findings
 

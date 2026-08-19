@@ -1,17 +1,31 @@
+import sys
 import os
 import requests
 from requests.auth import HTTPBasicAuth
 
-# Use the Windows (or macOS/Linux) OS certificate store for SSL verification
-# instead of Python's bundled certifi list. This picks up corporate root AND
-# intermediate certificates automatically — the same trust chain your browser
-# already uses — avoiding "missing intermediate certificate" errors that a
-# manually-exported single root cert can hit.
-try:
-    import truststore
-    truststore.inject_into_ssl()
-except ImportError:
-    pass  # falls back to REQUESTS_CA_BUNDLE / certifi if truststore isn't installed
+# SSL trust setup differs by platform:
+#
+# - Windows (native venv): no easy way to point `requests` at the OS trust
+#   store via an env var, so `truststore` globally patches ssl.SSLContext to
+#   read it directly. Safe here because jira_rest.py is the main thing using
+#   `requests` heavily in that setup.
+#
+# - Linux (Docker): the corporate CA is already merged into the system bundle
+#   by `update-ca-certificates` at build time (see Dockerfile). We do NOT use
+#   truststore's global monkey-patch here — inside the container, multiple
+#   libraries touch the SSL layer in the same process (requests, httpx/MCP,
+#   Ollama's client), and truststore's patch has been observed to cause
+#   "maximum recursion depth exceeded" in that combination. Pointing
+#   REQUESTS_CA_BUNDLE at the system bundle achieves the same trust result
+#   without any monkey-patching.
+if sys.platform == "win32":
+    try:
+        import truststore
+        truststore.inject_into_ssl()
+    except ImportError:
+        pass  # falls back to REQUESTS_CA_BUNDLE / certifi if truststore isn't installed
+else:
+    os.environ.setdefault("REQUESTS_CA_BUNDLE", "/etc/ssl/certs/ca-certificates.crt")
 
 JIRA_URL = os.environ.get("JIRA_URL")
 JIRA_USERNAME = os.environ.get("JIRA_USERNAME")

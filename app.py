@@ -676,6 +676,14 @@ async def _run_full_scan():
                 epic_key = epic.get("key")
                 epic_status = (epic.get("status") or {}).get("name")
                 _ensure_classified("epic", epic_status)
+
+                try:
+                    raw = jira_rest.get_issue_raw(epic_key)
+                    epic_findings = field_rules.check_epic_fields(raw.get("fields", {}), epic_status)
+                    field_findings_by_entity.append(("epic", epic_key, epic_status, epic_findings))
+                except Exception as e:
+                    print(f"[field_rules] could not check Epic {epic_key}: {e}")
+
                 cr_entries = epic_to_cr_entries.get(epic_key, [])
                 verdict = compliance_rules.evaluate_epic(epic_status, cr_entries)
                 if verdict["bottleneck_cr_key"] is None:

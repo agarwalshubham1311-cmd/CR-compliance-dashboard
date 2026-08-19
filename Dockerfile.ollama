@@ -1,0 +1,3 @@
+FROM ollama/ollama
+COPY corporate-ca.crt /usr/local/share/ca-certificates/corporate-ca.crt
+RUN update-ca-certificates
