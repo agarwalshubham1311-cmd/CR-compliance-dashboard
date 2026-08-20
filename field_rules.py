@@ -34,10 +34,12 @@ OUTCOME_FIELDS = {
 # GET /rest/api/3/issue/<EPIC-KEY>?expand=names, search the "names" block).
 EPIC_FIELDS = {
     "due_date": "duedate",
-    "target_delivery_date": "customfield_10112",
+    "target_delivery_date": "customfield_10184",  # Epic's OWN field — distinct from CR/Outcome's customfield_10112
     "description": "description",
     "labels": "labels",
     "priority": "priority",
+    "pi": "customfield_10183",
+    "delivery_data_confidence": "customfield_10185",
 }
 
 # Statuses past which "overdue date" checks no longer apply — a delivered
@@ -171,9 +173,15 @@ def check_epic_fields(fields, status_name):
         findings.append({"check": "missing_field", "field": "Priority", "severity": "Low",
                           "message": "Priority is not set"})
 
-    # PI and Delivery Data Confidence intentionally not checked yet —
-    # customfield IDs not confirmed. Add to EPIC_FIELDS above once known,
-    # then add the same missing_field check pattern here.
+    pi = _value(fields, EPIC_FIELDS["pi"])
+    if pi is None:
+        findings.append({"check": "missing_field", "field": "PI", "severity": "Low",
+                          "message": "PI is not set"})
+
+    delivery_confidence = _value(fields, EPIC_FIELDS["delivery_data_confidence"])
+    if delivery_confidence is None:
+        findings.append({"check": "missing_field", "field": "Delivery Data Confidence", "severity": "Low",
+                          "message": "Delivery Data Confidence is not set"})
 
     return findings
 

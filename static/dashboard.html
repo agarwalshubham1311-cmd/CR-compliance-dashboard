@@ -109,6 +109,15 @@
   </table>
 </div>
 
+<div class="table-wrap" id="epicFieldsWrap" style="display:none;margin-top:16px;">
+  <div class="table-header"><p>Field issues</p></div>
+  <table>
+    <colgroup id="epicFieldsColgroup"></colgroup>
+    <thead><tr id="epicFieldsHeadRow"></tr></thead>
+    <tbody id="epicFieldsRows"></tbody>
+  </table>
+</div>
+
 <div id="draftBox">
   <p style="font-size:12px;color:#886;margin:0 0 6px;">AI-drafted comment for <b id="draftFor"></b> — review before posting</p>
   <textarea id="draftText"></textarea>
@@ -131,6 +140,7 @@ let tabData = { epic: [], cr: [], story: [], outcome: [] };
 // Per-tab config: how to fetch, what columns to show, how to label things.
 const TABS = {
   epic: {
+    combined: true,
     columns: ["Epic", "Epic status", "Bottleneck CR", "CR status", "Reason", "Severity"],
     getRows: d => ({ left_key: d.story_key, left_status: d.story_status, right_key: d.cr_key, right_status: d.cr_status, reason: d.reason, severity: d.severity, score: d.score }),
     hasActions: false,
@@ -158,21 +168,27 @@ async function fetchJSON(url, opts) {
 }
 
 async function loadAll() {
-  const [summary, epicRows, outcomeRows, crFindings, outcomeFindings] = await Promise.all([
+  const [summary, epicPhaseRows, outcomeRows, crFindings, epicFindings, outcomeFindings] = await Promise.all([
     fetchJSON('/api/dashboard/summary'),
     fetchJSON('/api/pairs/epic-cr'),
     fetchJSON('/api/pairs/story-outcome'),
     fetchJSON('/api/fields/findings?entity_type=cr'),
+    fetchJSON('/api/fields/findings?entity_type=epic'),
     fetchJSON('/api/fields/findings?entity_type=outcome'),
   ]);
 
   tabData.story = summary.active || [];
-  tabData.epic = Array.isArray(epicRows) ? epicRows : [];
+  tabData.epic = Array.isArray(epicPhaseRows) ? epicPhaseRows : [];       // phase mismatches (primary table)
+  tabData._epicFields = Array.isArray(epicFindings) ? epicFindings : []; // field issues (second table)
   tabData.outcome = Array.isArray(outcomeRows) ? outcomeRows : [];
   tabData.cr = Array.isArray(crFindings) ? crFindings : [];
   tabData._outcomeFindings = Array.isArray(outcomeFindings) ? outcomeFindings : [];
 
-  document.getElementById('count-epic').textContent = tabData.epic.length;
+  const epicKeysUnion = new Set([
+    ...tabData.epic.map(d => d.story_key),
+    ...tabData._epicFields.map(f => f.entity_key),
+  ]);
+  document.getElementById('count-epic').textContent = epicKeysUnion.size;
   document.getElementById('count-cr').textContent = new Set(tabData.cr.map(f => f.entity_key)).size;
   document.getElementById('count-story').textContent = tabData.story.length;
   document.getElementById('count-outcome').textContent = tabData.outcome.length;
@@ -194,7 +210,9 @@ document.querySelectorAll('.tabbtn').forEach(b => b.addEventListener('click', ()
 
 function renderTab() {
   const cfg = TABS[currentTab];
-  document.getElementById('tableTitle').textContent = 'Non-compliant ' + currentTab + 's';
+  document.getElementById('tableTitle').textContent = cfg.combined
+    ? 'Phase mismatches'
+    : 'Non-compliant ' + currentTab + 's';
 
   // Header row + colgroup
   const headRow = document.getElementById('headRow');
@@ -218,6 +236,35 @@ function renderTab() {
   }
   const sevHeader = document.getElementById('sevHeader');
   if (sevHeader) sevHeader.addEventListener('click', () => { sortAsc = !sortAsc; renderRows(); });
+
+  // Second stacked table: only shown for combined (Epic) mode
+  const epicFieldsWrap = document.getElementById('epicFieldsWrap');
+  if (cfg.combined) {
+    epicFieldsWrap.style.display = 'block';
+    const efColgroup = document.getElementById('epicFieldsColgroup');
+    const efHeadRow = document.getElementById('epicFieldsHeadRow');
+    efColgroup.innerHTML = '';
+    efHeadRow.innerHTML = '';
+    ['Epic', 'Status', 'Severity', 'Issues'].forEach((c, i) => {
+      const th = document.createElement('th');
+      th.textContent = c;
+      efHeadRow.appendChild(th);
+      const col = document.createElement('col');
+      col.style.width = [16, 20, 14, 40][i] + '%';
+      efColgroup.appendChild(col);
+    });
+    efHeadRow.appendChild(document.createElement('th'));
+    renderFieldGroupTable(
+      tabData._epicFields || [],
+      document.getElementById('epicFieldsRows'),
+      4,
+      () => epicFieldsExpandedKey,
+      v => { epicFieldsExpandedKey = v; },
+      false
+    );
+  } else {
+    epicFieldsWrap.style.display = 'none';
+  }
 
   populateFilters();
   renderCards();
@@ -307,6 +354,62 @@ function renderCharts() {
   });
 }
 
+// Renders a grouped-by-entity field-findings table into the given
+// container. Reused by CR/Outcome-style fieldTab tabs (via renderRows)
+// and by Epic's second "Field issues" table (combined mode).
+let epicFieldsExpandedKey = null;
+
+function renderFieldGroupTable(findings, containerEl, colspan, expandedKeyGetter, expandedKeySetter, allowSort) {
+  containerEl.innerHTML = '';
+
+  if (findings.length === 0) {
+    containerEl.innerHTML = `<tr><td colspan="${colspan}" class="empty">No findings.</td></tr>`;
+    return;
+  }
+
+  const rank = { Critical: 3, High: 2, Medium: 1, Low: 0 };
+  const groups = {};
+  findings.forEach(f => {
+    if (!groups[f.entity_key]) {
+      groups[f.entity_key] = { key: f.entity_key, status: f.entity_status, findings: [], maxRank: 0 };
+    }
+    groups[f.entity_key].findings.push(f);
+    groups[f.entity_key].maxRank = Math.max(groups[f.entity_key].maxRank, rank[f.severity] || 0);
+  });
+  const groupList = Object.values(groups).sort((a, b) => allowSort && sortAsc ? a.maxRank - b.maxRank : b.maxRank - a.maxRank);
+  const sevLabel = { 3: 'Critical', 2: 'High', 1: 'Medium', 0: 'Low' };
+
+  groupList.forEach(g => {
+    const tr = document.createElement('tr');
+    tr.className = 'data-row';
+    tr.innerHTML = `
+      <td style="padding:8px 12px;"><a class="key-link" href="${JIRA_BASE}${g.key}" target="_blank" onclick="event.stopPropagation()">${g.key}</a></td>
+      <td style="padding:8px 12px;">${g.status || '-'}</td>
+      <td style="padding:8px 12px;"><span class="badge badge-${sevLabel[g.maxRank]}">${sevLabel[g.maxRank]}</span></td>
+      <td style="padding:8px 12px;color:#666;" colspan="2">${g.findings.length} issue${g.findings.length > 1 ? 's' : ''}</td>
+      <td style="padding:8px 12px;color:#999;text-align:right;">${expandedKeyGetter() === g.key ? '▾' : '▸'}</td>
+    `;
+    tr.addEventListener('click', () => {
+      expandedKeySetter(expandedKeyGetter() === g.key ? null : g.key);
+      renderTab();
+    });
+    containerEl.appendChild(tr);
+
+    if (expandedKeyGetter() === g.key) {
+      const detail = document.createElement('tr');
+      detail.className = 'detail-row';
+      const issueRows = g.findings.map(f => `
+        <div style="display:flex;align-items:center;gap:12px;padding:8px 0;border-top:1px solid #e6e6e6;font-size:13px;">
+          <span style="width:240px;flex-shrink:0;font-weight:500;">${f.field || '-'}</span>
+          <span style="color:${f.check_name === 'overdue' || f.check_name === 'go_live_overdue' ? '#c0392b' : '#888'};flex:1;">${f.message}</span>
+        </div>
+      `).join('');
+      detail.innerHTML = `<td colspan="${colspan}"><div style="padding:4px 20px 16px 44px;">${issueRows}</div></td>`;
+      containerEl.appendChild(detail);
+    }
+  });
+}
+
 function renderRows() {
   const cfg = TABS[currentTab];
   const reasonVal = document.getElementById('reasonFilter').value;
@@ -317,51 +420,7 @@ function renderRows() {
   if (cfg.fieldTab) {
     let filtered = tabData[currentTab]
       .filter(f => (reasonVal === 'all' || f.field === reasonVal) && (sevVal === 'all' || f.severity === sevVal));
-
-    if (filtered.length === 0) {
-      rows.innerHTML = `<tr><td colspan="5" class="empty">No findings match these filters.</td></tr>`;
-      return;
-    }
-
-    // Group findings by entity (CR/Outcome key) instead of one row per field
-    const rank = { Critical: 3, High: 2, Medium: 1, Low: 0 };
-    const groups = {};
-    filtered.forEach(f => {
-      if (!groups[f.entity_key]) {
-        groups[f.entity_key] = { key: f.entity_key, status: f.entity_status, findings: [], maxRank: 0 };
-      }
-      groups[f.entity_key].findings.push(f);
-      groups[f.entity_key].maxRank = Math.max(groups[f.entity_key].maxRank, rank[f.severity] || 0);
-    });
-    const groupList = Object.values(groups).sort((a, b) => sortAsc ? a.maxRank - b.maxRank : b.maxRank - a.maxRank);
-    const sevLabel = { 3: 'Critical', 2: 'High', 1: 'Medium', 0: 'Low' };
-
-    groupList.forEach(g => {
-      const tr = document.createElement('tr');
-      tr.className = 'data-row';
-      tr.innerHTML = `
-        <td style="padding:8px 12px;"><a class="key-link" href="${JIRA_BASE}${g.key}" target="_blank" onclick="event.stopPropagation()">${g.key}</a></td>
-        <td style="padding:8px 12px;">${g.status || '-'}</td>
-        <td style="padding:8px 12px;"><span class="badge badge-${sevLabel[g.maxRank]}">${sevLabel[g.maxRank]}</span></td>
-        <td style="padding:8px 12px;color:#666;" colspan="2">${g.findings.length} issue${g.findings.length > 1 ? 's' : ''}</td>
-        <td style="padding:8px 12px;color:#999;text-align:right;">${expandedKey === g.key ? '▾' : '▸'}</td>
-      `;
-      tr.addEventListener('click', () => { expandedKey = expandedKey === g.key ? null : g.key; renderRows(); });
-      rows.appendChild(tr);
-
-      if (expandedKey === g.key) {
-        const detail = document.createElement('tr');
-        detail.className = 'detail-row';
-        const issueRows = g.findings.map(f => `
-          <div style="display:flex;align-items:center;gap:12px;padding:8px 0;border-top:1px solid #e6e6e6;font-size:13px;">
-            <span style="width:240px;flex-shrink:0;font-weight:500;">${f.field || '-'}</span>
-            <span style="color:${f.check_name === 'overdue' || f.check_name === 'go_live_overdue' ? '#c0392b' : '#888'};flex:1;">${f.message}</span>
-          </div>
-        `).join('');
-        detail.innerHTML = `<td colspan="6"><div style="padding:4px 20px 16px 44px;">${issueRows}</div></td>`;
-        rows.appendChild(detail);
-      }
-    });
+    renderFieldGroupTable(filtered, rows, 6, () => expandedKey, v => { expandedKey = v; }, true);
     return;
   }
 
