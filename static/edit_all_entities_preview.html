@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Editable Dashboard — All Entity Types</title>
+<style>
+  body { font-family: sans-serif; max-width: 1150px; margin: 30px auto; padding: 0 16px; color: #1a1a1a; }
+  .note { background: #fffbe6; border: 1px solid #f0e0a0; border-radius: 8px; padding: 10px 14px; font-size: 13px; margin-bottom: 20px; }
+  .tabs { display: flex; gap: 4px; border-bottom: 1px solid #e0e0e0; margin-bottom: 20px; }
+  .tabbtn { border: none; background: none; padding: 10px 16px; font-size: 14px; color: #666; border-bottom: 2px solid transparent; cursor: pointer; }
+  .tabbtn.active { color: #185fa5; border-bottom: 2px solid #185fa5; font-weight: 600; }
+  .pane { display: none; }
+  .pane.active { display: block; }
+  .table-wrap { background: #fafafa; border: 1px solid #e0e0e0; border-radius: 10px; overflow: hidden; margin-bottom: 20px; }
+  .table-header { padding: 12px 16px; border-bottom: 1px solid #e0e0e0; font-size: 15px; font-weight: 600; }
+  .table-header span { font-weight: 400; color: #888; font-size: 13px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th { text-align: left; padding: 8px 12px; color: #666; font-weight: 600; }
+  td { padding: 8px 12px; border-top: 1px solid #eee; }
+  a.key-link { color: #185fa5; text-decoration: none; }
+  .badge { padding: 2px 8px; border-radius: 6px; font-size: 12px; }
+  .badge-High { background: #fdf0d9; color: #b5720a; }
+  .badge-Medium { background: #e6f0fb; color: #185fa5; }
+  .badge-Low { background: #eee; color: #555; }
+  select, input { font-size: 13px; padding: 4px 8px; border-radius: 6px; border: 1px solid #ccc; }
+  .save-btn { font-size: 12px; padding: 5px 12px; border: 1px solid #ccc; background: #fff; border-radius: 6px; cursor: pointer; }
+  .save-btn:hover { background: #eee; }
+  .detail { background: #f4f4f4; padding: 12px 16px 12px 44px; }
+  .issue-row { display: flex; align-items: center; gap: 10px; padding: 8px 0; border-top: 1px solid #e6e6e6; }
+  .issue-field { width: 220px; flex-shrink: 0; font-weight: 500; }
+  .issue-msg { color: #888; flex: 1; font-size: 12px; }
+  .issue-msg.set { color: #185fa5; }
+  .issue-msg.missing { color: #c0392b; }
+  #actionLog { font-size: 12px; color: #666; background: #f4f4f4; border-radius: 8px; padding: 10px 14px; min-height: 20px; }
+</style>
+</head>
+<body>
+
+<div class="note">
+  ⚠️ Preview only. Every field is now editable — not just the missing ones. Fields with a current value show it pre-filled (blue label); empty fields show "Not set" (red label) — same input, same Save button either way.
+</div>
+
+<div class="tabs" id="tabs">
+  <button class="tabbtn active" data-tab="epic">Epic</button>
+  <button class="tabbtn" data-tab="cr">CR</button>
+  <button class="tabbtn" data-tab="story">Story</button>
+  <button class="tabbtn" data-tab="outcome">Outcome</button>
+</div>
+
+<!-- EPIC -->
+<div class="pane active" id="pane-epic">
+  <div class="table-wrap">
+    <div class="table-header">Non-compliant epics <span>— phase mismatch, change status</span></div>
+    <table>
+      <thead><tr><th>Epic</th><th>Status</th><th>Bottleneck CR</th><th>CR status</th><th>Reason</th><th>Actions</th></tr></thead>
+      <tbody><tr>
+        <td><a class="key-link" href="#">TPOC-1</a></td>
+        <td><select><option selected>BACKLOG</option><option>IN ANALYSIS</option><option>IN PROGRESS</option></select></td>
+        <td><a class="key-link" href="#">TPOC-12</a></td>
+        <td>In development</td>
+        <td><span class="badge badge-Medium">Epic behind CR phase</span></td>
+        <td><button class="save-btn" onclick="log('TPOC-1 status')">Update</button></td>
+      </tr></tbody>
+    </table>
+  </div>
+  <div class="table-wrap">
+    <div class="table-header">Field issues <span>— all fields editable, current values shown</span></div>
+    <table>
+      <thead><tr><th>Epic</th><th>Status</th><th colspan="2">Issues</th></tr></thead>
+      <tbody>
+        <tr><td><a class="key-link" href="#">TPOC-44</a></td><td>IN ANALYSIS</td><td colspan="2">7 fields ▾</td></tr>
+        <tr><td colspan="4"><div class="detail">
+          <div class="issue-row"><span class="issue-field">Priority</span><span class="issue-msg set">High</span>
+            <select><option>Low</option><option>Medium</option><option selected>High</option></select>
+            <button class="save-btn" onclick="log('TPOC-44 · Priority')">Save</button></div>
+          <div class="issue-row"><span class="issue-field">Due Date</span><span class="issue-msg missing">Not set</span>
+            <input type="date"><button class="save-btn" onclick="log('TPOC-44 · Due Date')">Save</button></div>
+          <div class="issue-row"><span class="issue-field">Labels</span><span class="issue-msg missing">Not set</span>
+            <input type="text" placeholder="comma-separated"><button class="save-btn" onclick="log('TPOC-44 · Labels')">Save</button></div>
+        </div></td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<!-- CR -->
+<div class="pane" id="pane-cr">
+  <div class="table-wrap">
+    <div class="table-header">Field issues <span>— all fields editable, current values shown</span></div>
+    <table>
+      <thead><tr><th>CR</th><th>Status</th><th colspan="2">Issues</th></tr></thead>
+      <tbody>
+        <tr><td><a class="key-link" href="#">TPOC-12</a></td><td>In development</td><td colspan="2">9 fields ▾</td></tr>
+        <tr><td colspan="4"><div class="detail">
+          <div class="issue-row"><span class="issue-field">Complexity</span><span class="issue-msg missing">Not set</span>
+            <select><option value="">Choose...</option><option>Low</option><option>Medium</option><option>High</option></select>
+            <button class="save-btn" onclick="log('TPOC-12 · Complexity')">Save</button></div>
+          <div class="issue-row"><span class="issue-field">Funded By</span><span class="issue-msg set">Digital Transformation</span>
+            <input type="text" value="Digital Transformation"><button class="save-btn" onclick="log('TPOC-12 · Funded By')">Save</button></div>
+          <div class="issue-row"><span class="issue-field">Target Delivery Date</span><span class="issue-msg missing">Not set</span>
+            <input type="date"><button class="save-btn" onclick="log('TPOC-12 · Target Delivery Date')">Save</button></div>
+        </div></td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<!-- STORY -->
+<div class="pane" id="pane-story">
+  <div class="table-wrap">
+    <div class="table-header">Non-compliant stories <span>— change status</span></div>
+    <table>
+      <thead><tr><th>Story</th><th>Status</th><th>CR</th><th>CR status</th><th>Reason</th><th>Actions</th></tr></thead>
+      <tbody><tr>
+        <td><a class="key-link" href="#">TPOC-11</a></td>
+        <td><select><option selected>To do</option><option>In Analysis</option><option>In Progress</option></select></td>
+        <td><a class="key-link" href="#">TPOC-12</a></td>
+        <td>In development</td>
+        <td><span class="badge badge-High">Story behind CR phase</span></td>
+        <td><button class="save-btn" onclick="log('TPOC-11 status')">Update</button></td>
+      </tr></tbody>
+    </table>
+  </div>
+</div>
+
+<!-- OUTCOME -->
+<div class="pane" id="pane-outcome">
+  <div class="table-wrap">
+    <div class="table-header">Non-compliant outcomes <span>— phase mismatch, change status</span></div>
+    <table>
+      <thead><tr><th>Outcome</th><th>Status</th><th>Story</th><th>Story status</th><th>Reason</th><th>Actions</th></tr></thead>
+      <tbody><tr>
+        <td><a class="key-link" href="#">TPOC-68</a></td>
+        <td><select><option selected>Open</option><option>To Do</option><option>In Development</option></select></td>
+        <td><a class="key-link" href="#">TPOC-9</a></td>
+        <td>In Progress</td>
+        <td><span class="badge badge-Low">Unmapped status</span></td>
+        <td><button class="save-btn" onclick="log('TPOC-68 status')">Update</button></td>
+      </tr></tbody>
+    </table>
+  </div>
+  <div class="table-wrap">
+    <div class="table-header">Field issues <span>— all fields editable, current values shown</span></div>
+    <table>
+      <thead><tr><th>Outcome</th><th>Status</th><th colspan="2">Issues</th></tr></thead>
+      <tbody>
+        <tr><td><a class="key-link" href="#">TPOC-68</a></td><td>Open</td><td colspan="2">4 fields ▾</td></tr>
+        <tr><td colspan="4"><div class="detail">
+          <div class="issue-row"><span class="issue-field">Target Delivery Date</span><span class="issue-msg set">2025-11-30</span>
+            <input type="date" value="2025-11-30"><button class="save-btn" onclick="log('TPOC-68 · Target Delivery Date')">Save</button></div>
+          <div class="issue-row"><span class="issue-field">RAG Status</span><span class="issue-msg missing">Not set</span>
+            <select><option value="">Choose...</option><option>Red</option><option>Amber</option><option>Green</option></select>
+            <button class="save-btn" onclick="log('TPOC-68 · RAG Status')">Save</button></div>
+          <div class="issue-row"><span class="issue-field">Go Live Date</span><span class="issue-msg missing">Not set</span>
+            <input type="date"><button class="save-btn" onclick="log('TPOC-68 · Go Live Date')">Save</button></div>
+        </div></td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<div id="actionLog">Actions log here.</div>
+
+<script>
+document.querySelectorAll('.tabbtn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.tabbtn').forEach(b => b.classList.remove('active'));
+    document.querySelectorAll('.pane').forEach(p => p.classList.remove('active'));
+    btn.classList.add('active');
+    document.getElementById('pane-' + btn.dataset.tab).classList.add('active');
+  });
+});
+function log(item) {
+  document.getElementById('actionLog').textContent = `Would call: POST /api/jira/update-field or /transition for "${item}" — writes to Jira`;
+}
+</script>
+</body>
+</html>

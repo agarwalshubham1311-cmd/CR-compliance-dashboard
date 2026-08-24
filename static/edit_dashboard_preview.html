@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Dashboard Mockup — Edit Non-Compliance</title>
+<style>
+  body { font-family: sans-serif; max-width: 1150px; margin: 30px auto; padding: 0 16px; color: #1a1a1a; }
+  .note { background: #fffbe6; border: 1px solid #f0e0a0; border-radius: 8px; padding: 10px 14px; font-size: 13px; margin-bottom: 20px; }
+  .tabs { display: flex; gap: 4px; border-bottom: 1px solid #e0e0e0; margin-bottom: 20px; }
+  .tabbtn { border: none; background: none; padding: 10px 16px; font-size: 14px; color: #666; border-bottom: 2px solid transparent; }
+  .tabbtn.active { color: #185fa5; border-bottom: 2px solid #185fa5; font-weight: 600; }
+  .table-wrap { background: #fafafa; border: 1px solid #e0e0e0; border-radius: 10px; overflow: hidden; margin-bottom: 20px; }
+  .table-header { padding: 12px 16px; border-bottom: 1px solid #e0e0e0; font-size: 15px; font-weight: 600; }
+  .table-header span { font-weight: 400; color: #888; font-size: 13px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th { text-align: left; padding: 8px 12px; color: #666; font-weight: 600; }
+  td { padding: 8px 12px; border-top: 1px solid #eee; }
+  a.key-link { color: #185fa5; text-decoration: none; }
+  .badge { padding: 2px 8px; border-radius: 6px; font-size: 12px; }
+  .badge-High { background: #fdf0d9; color: #b5720a; }
+  .badge-Medium { background: #e6f0fb; color: #185fa5; }
+  .badge-Low { background: #eee; color: #555; }
+  select, input { font-size: 13px; padding: 4px 8px; border-radius: 6px; border: 1px solid #ccc; }
+  .save-btn { font-size: 12px; padding: 5px 12px; border: 1px solid #ccc; background: #fff; border-radius: 6px; cursor: pointer; }
+  .save-btn:hover { background: #eee; }
+  .save-btn.primary { background: #185fa5; color: #fff; border-color: #185fa5; }
+  .detail { background: #f4f4f4; padding: 12px 16px 12px 44px; }
+  .issue-row { display: flex; align-items: center; gap: 10px; padding: 8px 0; border-top: 1px solid #e6e6e6; }
+  .issue-field { width: 220px; flex-shrink: 0; font-weight: 500; }
+  .issue-msg { color: #888; flex: 1; }
+  #actionLog { font-size: 12px; color: #666; background: #f4f4f4; border-radius: 8px; padding: 10px 14px; min-height: 20px; }
+  .pending-badge { background: #fffbe6; color: #8a6d00; font-size: 11px; padding: 2px 8px; border-radius: 6px; margin-left: 8px; }
+</style>
+</head>
+<body>
+
+<div class="note">
+  ⚠️ Preview only — not connected to real data. Shows the two edit patterns: status change on phase-mismatch rows (Story/Outcome), field edit on field-issue rows (CR/Epic).
+</div>
+
+<div class="tabs">
+  <button class="tabbtn">Epic</button>
+  <button class="tabbtn">CR</button>
+  <button class="tabbtn active">Story</button>
+  <button class="tabbtn">Outcome</button>
+</div>
+
+<!-- Pattern 1: Story/Outcome tabs — status change dropdown, gated behind approval -->
+<div class="table-wrap">
+  <div class="table-header">Non-compliant stories <span>— change status directly, or draft a comment first</span></div>
+  <table>
+    <thead><tr>
+      <th>Story</th><th>Status</th><th>CR</th><th>CR status</th><th>Reason</th><th>Severity</th><th>Actions</th>
+    </tr></thead>
+    <tbody>
+      <tr>
+        <td><a class="key-link" href="#">TPOC-11</a></td>
+        <td>
+          <select id="statusSelect1">
+            <option>To do</option>
+            <option selected>To do</option>
+            <option>In Analysis</option>
+            <option>In Progress</option>
+            <option>Development Done</option>
+          </select>
+        </td>
+        <td><a class="key-link" href="#">TPOC-12</a></td>
+        <td>In development</td>
+        <td><span class="badge badge-High">Story behind CR phase</span></td>
+        <td><span class="badge badge-High">High</span></td>
+        <td>
+          <button class="save-btn" onclick="log('TPOC-11', 'status_change_direct')">Update</button>
+          <button class="save-btn primary" onclick="log('TPOC-11', 'status_change_review')">Propose ↗</button>
+        </td>
+      </tr>
+      <tr>
+        <td><a class="key-link" href="#">TPOC-5</a> <span class="pending-badge">pending review</span></td>
+        <td>To do → <b>In Progress</b></td>
+        <td><a class="key-link" href="#">TPOC-12</a></td>
+        <td>In development</td>
+        <td><span class="badge badge-High">Story behind CR phase</span></td>
+        <td><span class="badge badge-High">High</span></td>
+        <td>
+          <button class="save-btn primary" onclick="log('TPOC-5', 'approve')">Approve</button>
+          <button class="save-btn" onclick="log('TPOC-5', 'reject')">Reject</button>
+        </td>
+      </tr>
+    </tbody>
+  </table>
+</div>
+
+<!-- Pattern 2: CR/Epic field-issue tabs — inline field edit, grouped, same expand pattern as before -->
+<div class="table-wrap">
+  <div class="table-header">Non-compliant CRs <span>— grouped, edit fields inline</span></div>
+  <table>
+    <thead><tr><th>CR</th><th>Status</th><th>Severity</th><th colspan="2">Issues</th></tr></thead>
+    <tbody>
+      <tr>
+        <td><a class="key-link" href="#">TPOC-12</a></td>
+        <td>In development</td>
+        <td><span class="badge badge-High">High</span></td>
+        <td colspan="2">8 issues ▾</td>
+      </tr>
+      <tr>
+        <td colspan="5">
+          <div class="detail">
+            <div class="issue-row">
+              <span class="issue-field">Complexity</span>
+              <span class="issue-msg">Not set</span>
+              <select><option value="">Choose...</option><option>Low</option><option>Medium</option><option>High</option></select>
+              <button class="save-btn" onclick="log('TPOC-12 · Complexity', 'field_update_direct')">Save</button>
+            </div>
+            <div class="issue-row">
+              <span class="issue-field">Target Delivery Date</span>
+              <span class="issue-msg">Not set</span>
+              <input type="date">
+              <button class="save-btn" onclick="log('TPOC-12 · Target Delivery Date', 'field_update_direct')">Save</button>
+            </div>
+          </div>
+        </td>
+      </tr>
+    </tbody>
+  </table>
+</div>
+
+<div id="actionLog">Actions log here — shows what would actually be sent to Jira.</div>
+
+<script>
+function log(item, action) {
+  const messages = {
+    status_change_direct: `Would call: POST /api/jira/transition { issue_key: "${item}", status: "..." } — writes to Jira immediately`,
+    status_change_review: `Would call: POST /api/edits/propose { issue_key: "${item}", type: "status" } — queues for review, no write yet`,
+    approve: `Would call: POST /api/edits/approve { issue_key: "${item}" } — now writes the previously-proposed change to Jira`,
+    reject: `Would call: POST /api/edits/reject { issue_key: "${item}" } — discards, no write`,
+    field_update_direct: `Would call: POST /api/jira/update-field { target: "${item}", value: "..." } — writes to Jira immediately`,
+  };
+  document.getElementById('actionLog').textContent = messages[action];
+}
+</script>
+</body>
+</html>

@@ -128,11 +128,22 @@
   <p id="draftStatus"></p>
 </div>
 
+<div id="statusBox" style="display:none;background:#e6f0fb;border:1px solid #185fa5;border-radius:8px;padding:14px;margin:12px 0;">
+  <p style="font-size:12px;color:#185fa5;margin:0 0 6px;">Change status for <b id="statusFor"></b></p>
+  <select id="statusSelect" style="width:auto;"></select>
+  <div style="margin-top:8px;display:flex;gap:8px;">
+    <button onclick="applyStatusChange()">Apply</button>
+    <button onclick="closeStatusBox()">Cancel</button>
+  </div>
+  <p id="statusBoxMsg" style="font-size:12px;color:#888;margin:6px 0 0;"></p>
+</div>
+
 <script>
 const JIRA_BASE = "https://mastek-team-cuv3mazl.atlassian.net/browse/";
 let chart1, chart2;
 let sortAsc = false;
 let expandedKey = null;
+let fieldGroupCache = {};
 let currentDraftStoryKey = null;
 let currentTab = "epic";
 let tabData = { epic: [], cr: [], story: [], outcome: [] };
@@ -143,10 +154,11 @@ const TABS = {
     combined: true,
     columns: ["Epic", "Epic status", "Bottleneck CR", "CR status", "Reason", "Severity"],
     getRows: d => ({ left_key: d.story_key, left_status: d.story_status, right_key: d.cr_key, right_status: d.cr_status, reason: d.reason, severity: d.severity, score: d.score }),
-    hasActions: false,
+    hasActions: true,
+    dependentSide: 'left',  // Epic is the dependent side — comment target
   },
   cr: {
-    columns: ["CR", "Status", "Severity", "Issues"],
+    columns: ["CR", "Status", "Severity", "Issues", "Actions"],
     fieldTab: true,
     hasActions: false,
   },
@@ -154,11 +166,14 @@ const TABS = {
     columns: ["Story", "Story status", "CR", "CR status", "Reason", "Severity"],
     getRows: d => ({ left_key: d.story_key, left_status: d.story_status, right_key: d.cr_key, right_status: d.cr_status, reason: d.reason, severity: d.severity, score: d.score }),
     hasActions: true,
+    hasResolve: true,
+    dependentSide: 'left',  // Story is the dependent side — comment target
   },
   outcome: {
     columns: ["Story", "Story status", "Outcome", "Outcome status", "Reason", "Severity"],
     getRows: d => ({ left_key: d.cr_key, left_status: d.cr_status, right_key: d.story_key, right_status: d.story_status, reason: d.reason, severity: d.severity, score: d.score }),
-    hasActions: false,
+    hasActions: true,
+    dependentSide: 'right',  // Outcome (right_key) is the dependent side — comment target
   },
 };
 
@@ -219,7 +234,7 @@ function renderTab() {
   const colgroup = document.getElementById('colgroup');
   headRow.innerHTML = '';
   colgroup.innerHTML = '';
-  const widths = cfg.hasActions ? [12, 16, 12, 16, 24, 12, 8] : (cfg.fieldTab ? [16, 20, 14, 40] : [14, 16, 14, 16, 26, 14]);
+  const widths = cfg.hasActions ? [12, 16, 12, 16, 24, 12, 8] : (cfg.fieldTab ? [14, 18, 12, 26, 20] : [14, 16, 14, 16, 26, 14]);
   const cols = cfg.hasActions ? [...cfg.columns, 'Actions'] : cfg.columns;
   cols.forEach((c, i) => {
     const th = document.createElement('th');
@@ -245,22 +260,23 @@ function renderTab() {
     const efHeadRow = document.getElementById('epicFieldsHeadRow');
     efColgroup.innerHTML = '';
     efHeadRow.innerHTML = '';
-    ['Epic', 'Status', 'Severity', 'Issues'].forEach((c, i) => {
+    ['Epic', 'Status', 'Severity', 'Issues', 'Actions'].forEach((c, i) => {
       const th = document.createElement('th');
       th.textContent = c;
       efHeadRow.appendChild(th);
       const col = document.createElement('col');
-      col.style.width = [16, 20, 14, 40][i] + '%';
+      col.style.width = [14, 18, 12, 26, 20][i] + '%';
       efColgroup.appendChild(col);
     });
     efHeadRow.appendChild(document.createElement('th'));
     renderFieldGroupTable(
       tabData._epicFields || [],
       document.getElementById('epicFieldsRows'),
-      4,
+      6,
       () => epicFieldsExpandedKey,
       v => { epicFieldsExpandedKey = v; },
-      false
+      false,
+      'epic'
     );
   } else {
     epicFieldsWrap.style.display = 'none';
@@ -359,7 +375,7 @@ function renderCharts() {
 // and by Epic's second "Field issues" table (combined mode).
 let epicFieldsExpandedKey = null;
 
-function renderFieldGroupTable(findings, containerEl, colspan, expandedKeyGetter, expandedKeySetter, allowSort) {
+function renderFieldGroupTable(findings, containerEl, colspan, expandedKeyGetter, expandedKeySetter, allowSort, entityType) {
   containerEl.innerHTML = '';
 
   if (findings.length === 0) {
@@ -380,13 +396,16 @@ function renderFieldGroupTable(findings, containerEl, colspan, expandedKeyGetter
   const sevLabel = { 3: 'Critical', 2: 'High', 1: 'Medium', 0: 'Low' };
 
   groupList.forEach(g => {
+    fieldGroupCache[g.key] = g;
+
     const tr = document.createElement('tr');
     tr.className = 'data-row';
     tr.innerHTML = `
       <td style="padding:8px 12px;"><a class="key-link" href="${JIRA_BASE}${g.key}" target="_blank" onclick="event.stopPropagation()">${g.key}</a></td>
       <td style="padding:8px 12px;">${g.status || '-'}</td>
       <td style="padding:8px 12px;"><span class="badge badge-${sevLabel[g.maxRank]}">${sevLabel[g.maxRank]}</span></td>
-      <td style="padding:8px 12px;color:#666;" colspan="2">${g.findings.length} issue${g.findings.length > 1 ? 's' : ''}</td>
+      <td style="padding:8px 12px;color:#666;">${g.findings.length} issue${g.findings.length > 1 ? 's' : ''}</td>
+      <td style="padding:8px 12px;"><button onclick="event.stopPropagation();draftFieldComment('${g.key}', fieldGroupCache['${g.key}'].status, fieldGroupCache['${g.key}'].findings)">Draft</button></td>
       <td style="padding:8px 12px;color:#999;text-align:right;">${expandedKeyGetter() === g.key ? '▾' : '▸'}</td>
     `;
     tr.addEventListener('click', () => {
@@ -398,16 +417,69 @@ function renderFieldGroupTable(findings, containerEl, colspan, expandedKeyGetter
     if (expandedKeyGetter() === g.key) {
       const detail = document.createElement('tr');
       detail.className = 'detail-row';
-      const issueRows = g.findings.map(f => `
-        <div style="display:flex;align-items:center;gap:12px;padding:8px 0;border-top:1px solid #e6e6e6;font-size:13px;">
-          <span style="width:240px;flex-shrink:0;font-weight:500;">${f.field || '-'}</span>
-          <span style="color:${f.check_name === 'overdue' || f.check_name === 'go_live_overdue' ? '#c0392b' : '#888'};flex:1;">${f.message}</span>
-        </div>
-      `).join('');
-      detail.innerHTML = `<td colspan="${colspan}"><div style="padding:4px 20px 16px 44px;">${issueRows}</div></td>`;
+      detail.innerHTML = `<td colspan="${colspan}"><div id="fielddetail-${g.key}" style="padding:4px 20px 16px 44px;">Loading current field values...</div></td>`;
       containerEl.appendChild(detail);
+      loadEditableFields(g.key, entityType);
     }
   });
+}
+
+async function loadEditableFields(entityKey, entityType) {
+  const el = document.getElementById(`fielddetail-${entityKey}`);
+  if (!el) return; // user collapsed before this resolved
+
+  const result = await fetchJSON(`/api/entities/${entityType}/${entityKey}/fields`);
+  const container = document.getElementById(`fielddetail-${entityKey}`);
+  if (!container) return; // still-collapsed guard after the await
+
+  if (result.error) {
+    container.textContent = 'Error loading fields: ' + result.error;
+    return;
+  }
+
+  container.innerHTML = result.fields.map(f => {
+    let input;
+    const safeVal = (f.value ?? '').toString().replace(/"/g, '&quot;');
+    if (f.type === 'select' && f.options) {
+      input = `<select id="fv-${entityKey}-${f.key}">
+        <option value="">Choose...</option>
+        ${f.options.map(o => `<option value="${o}" ${o === f.value ? 'selected' : ''}>${o}</option>`).join('')}
+      </select>`;
+    } else if (f.type === 'date') {
+      input = `<input id="fv-${entityKey}-${f.key}" type="date" value="${f.value || ''}">`;
+    } else if (f.type === 'labels') {
+      const joined = Array.isArray(f.value) ? f.value.join(', ') : '';
+      input = `<input id="fv-${entityKey}-${f.key}" type="text" value="${joined}" placeholder="comma-separated">`;
+    } else {
+      input = `<input id="fv-${entityKey}-${f.key}" type="text" value="${safeVal}">`;
+    }
+    const isSet = f.value !== null && f.value !== undefined && f.value !== '';
+    return `
+      <div style="display:flex;align-items:center;gap:10px;padding:8px 0;border-top:1px solid #e6e6e6;font-size:13px;">
+        <span style="width:220px;flex-shrink:0;font-weight:500;">${f.label}</span>
+        <span style="width:60px;flex-shrink:0;font-size:11px;color:${isSet ? '#185fa5' : '#c0392b'};">${isSet ? 'set' : 'not set'}</span>
+        ${input}
+        <button onclick="saveEntityField('${entityKey}','${entityType}','${f.key}')">Save</button>
+        <span id="fv-msg-${entityKey}-${f.key}" style="font-size:12px;color:#888;"></span>
+      </div>`;
+  }).join('');
+}
+
+async function saveEntityField(entityKey, entityType, fieldKey) {
+  const input = document.getElementById(`fv-${entityKey}-${fieldKey}`);
+  const msg = document.getElementById(`fv-msg-${entityKey}-${fieldKey}`);
+  if (!input) return;
+  msg.textContent = 'Saving...';
+  const result = await fetchJSON('/api/jira/update-field', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ issue_key: entityKey, entity_type: entityType, field_key: fieldKey, value: input.value })
+  });
+  if (result.error) {
+    msg.textContent = 'Error: ' + result.error;
+  } else {
+    msg.textContent = 'Saved ✓';
+    setTimeout(() => loadAll(), 1000); // refresh so findings/severity reflect the change
+  }
 }
 
 function renderRows() {
@@ -420,7 +492,7 @@ function renderRows() {
   if (cfg.fieldTab) {
     let filtered = tabData[currentTab]
       .filter(f => (reasonVal === 'all' || f.field === reasonVal) && (sevVal === 'all' || f.severity === sevVal));
-    renderFieldGroupTable(filtered, rows, 6, () => expandedKey, v => { expandedKey = v; }, true);
+    renderFieldGroupTable(filtered, rows, 6, () => expandedKey, v => { expandedKey = v; }, true, currentTab);
     return;
   }
 
@@ -439,9 +511,18 @@ function renderRows() {
     tr.className = 'data-row';
     let actionCell = '';
     if (cfg.hasActions) {
+      const isTargetLeft = cfg.dependentSide !== 'right';
+      const targetKey = isTargetLeft ? d.left_key : d.right_key;
+      const targetStatus = isTargetLeft ? d.left_status : d.right_status;
+      const otherKey = isTargetLeft ? d.right_key : d.left_key;
+      const otherStatus = isTargetLeft ? d.right_status : d.left_status;
+      const resolveBtn = cfg.hasResolve
+        ? `<button onclick="event.stopPropagation();resolveRow('${d.left_key}','${d.right_key}')">Resolve</button>`
+        : '';
       actionCell = `<td style="padding:8px 12px;">
-        <button onclick="event.stopPropagation();resolveRow('${d.left_key}','${d.right_key}')">Resolve</button>
-        <button onclick="event.stopPropagation();draftComment('${d.left_key}','${d.right_key}')">Draft</button>
+        ${resolveBtn}
+        <button onclick="event.stopPropagation();openStatusBox('${targetKey}')">Change status</button>
+        <button onclick="event.stopPropagation();draftPhaseComment('${targetKey}','${targetStatus}','${otherKey}','${otherStatus}','${(d.reason||'').replace(/'/g,"\\'")}','${d.severity}')">Draft</button>
       </td>`;
     }
     tr.innerHTML = `
@@ -459,6 +540,11 @@ function renderRows() {
 
     if (expandedKey === d.left_key) {
       const colspan = cfg.hasActions ? 7 : 6;
+      const isTargetLeft = cfg.dependentSide !== 'right';
+      const targetKey = isTargetLeft ? d.left_key : d.right_key;
+      const targetStatus = isTargetLeft ? d.left_status : d.right_status;
+      const otherKey = isTargetLeft ? d.right_key : d.left_key;
+      const otherStatus = isTargetLeft ? d.right_status : d.left_status;
       const detail = document.createElement('tr');
       detail.className = 'detail-row';
       detail.innerHTML = `<td colspan="${colspan}"><div class="detail-inner">
@@ -467,8 +553,9 @@ function renderRows() {
           <div><span class="k">Severity score</span><br>${d.score || 0} pts</div>
         </div>
         <div class="detail-actions">
-          ${cfg.hasActions ? `<button onclick="event.stopPropagation();draftComment('${d.left_key}','${d.right_key}')">Draft comment</button>
-          <button onclick="event.stopPropagation();resolveRow('${d.left_key}','${d.right_key}')">Mark resolved</button>` : ''}
+          ${cfg.hasActions ? `<button onclick="event.stopPropagation();openStatusBox('${targetKey}')">Change status</button>
+          <button onclick="event.stopPropagation();draftPhaseComment('${targetKey}','${targetStatus}','${otherKey}','${otherStatus}','${(d.reason||'').replace(/'/g,"\\'")}','${d.severity}')">Draft comment</button>` : ''}
+          ${cfg.hasResolve ? `<button onclick="event.stopPropagation();resolveRow('${d.left_key}','${d.right_key}')">Mark resolved</button>` : ''}
           <a href="${JIRA_BASE}${d.left_key}" target="_blank">Open in Jira ↗</a>
         </div>
       </div></td>`;
@@ -488,17 +575,47 @@ async function resolveRow(story_key, cr_key) {
   loadAll();
 }
 
-async function draftComment(story_key, cr_key) {
+async function draftPhaseComment(targetKey, targetStatus, otherKey, otherStatus, reason, severity) {
   const box = document.getElementById('draftBox');
-  document.getElementById('draftFor').textContent = story_key;
+  document.getElementById('draftFor').textContent = targetKey;
   document.getElementById('draftText').value = 'Generating draft with local LLM...';
   document.getElementById('draftStatus').textContent = '';
   box.style.display = 'block';
-  currentDraftStoryKey = story_key;
+  currentDraftStoryKey = targetKey;
 
   const result = await fetchJSON('/api/ai/draft-comment', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ story_key, cr_key })
+    body: JSON.stringify({
+      mode: 'phase',
+      target_key: targetKey, target_status: targetStatus,
+      other_key: otherKey, other_status: otherStatus,
+      reason, severity,
+    })
+  });
+
+  if (result.error) {
+    document.getElementById('draftText').value = '';
+    document.getElementById('draftStatus').textContent = 'Error: ' + result.error;
+  } else {
+    document.getElementById('draftText').value = result.draft;
+  }
+}
+
+async function draftFieldComment(entityKey, entityStatus, findings) {
+  const box = document.getElementById('draftBox');
+  document.getElementById('draftFor').textContent = entityKey;
+  document.getElementById('draftText').value = 'Generating draft with local LLM...';
+  document.getElementById('draftStatus').textContent = '';
+  box.style.display = 'block';
+  currentDraftStoryKey = entityKey;
+
+  const result = await fetchJSON('/api/ai/draft-comment', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      mode: 'fields',
+      entity_key: entityKey, entity_status: entityStatus,
+      findings,
+    })
   });
 
   if (result.error) {
@@ -523,6 +640,50 @@ async function postDraft() {
 
 function closeDraft() {
   document.getElementById('draftBox').style.display = 'none';
+}
+
+let currentStatusTargetKey = null;
+
+async function openStatusBox(issueKey) {
+  const box = document.getElementById('statusBox');
+  document.getElementById('statusFor').textContent = issueKey;
+  document.getElementById('statusBoxMsg').textContent = 'Loading available transitions...';
+  document.getElementById('statusSelect').innerHTML = '';
+  box.style.display = 'block';
+  currentStatusTargetKey = issueKey;
+
+  const result = await fetchJSON(`/api/jira/transitions/${issueKey}`);
+  if (result.error) {
+    document.getElementById('statusBoxMsg').textContent = 'Error: ' + result.error;
+    return;
+  }
+  const sel = document.getElementById('statusSelect');
+  if (!result.transitions || result.transitions.length === 0) {
+    document.getElementById('statusBoxMsg').textContent = 'No transitions available from the current status.';
+    return;
+  }
+  sel.innerHTML = result.transitions.map(t => `<option value="${t.id}">${t.to_status} (${t.name})</option>`).join('');
+  document.getElementById('statusBoxMsg').textContent = '';
+}
+
+async function applyStatusChange() {
+  const transitionId = document.getElementById('statusSelect').value;
+  if (!transitionId) return;
+  document.getElementById('statusBoxMsg').textContent = 'Applying...';
+  const result = await fetchJSON('/api/jira/transition', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ issue_key: currentStatusTargetKey, transition_id: transitionId })
+  });
+  if (result.error) {
+    document.getElementById('statusBoxMsg').textContent = 'Error: ' + result.error;
+  } else {
+    document.getElementById('statusBoxMsg').textContent = 'Updated ✓';
+    setTimeout(() => { closeStatusBox(); loadAll(); }, 800);
+  }
+}
+
+function closeStatusBox() {
+  document.getElementById('statusBox').style.display = 'none';
 }
 
 async function refresh() {

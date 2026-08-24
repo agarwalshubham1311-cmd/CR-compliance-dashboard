@@ -42,6 +42,78 @@ EPIC_FIELDS = {
     "delivery_data_confidence": "customfield_10185",
 }
 
+# Human-readable labels for each field key, used by both the API responses
+# and (indirectly) the dashboard so the frontend doesn't need its own copy.
+CR_FIELD_LABELS = {
+    "epic_link": "Epic Link", "complexity": "Complexity", "funded_by": "Funded By",
+    "baseline_target_delivery_date": "Baseline Target Delivery Date",
+    "baseline_prp_date": "Baseline PRP Date", "actual_prp_start_date": "Actual PRP Start Date",
+    "prp_status": "PRP Status", "release_through": "Release Through",
+    "target_delivery_date": "Target Delivery Date", "reason_for_delay": "Reason for Delay",
+    "blocked_by_dependency": "Blocked by/Dependency",
+}
+EPIC_FIELD_LABELS = {
+    "due_date": "Due Date", "target_delivery_date": "Target Delivery Date",
+    "description": "Description", "labels": "Labels", "priority": "Priority",
+    "pi": "PI", "delivery_data_confidence": "Delivery Data Confidence",
+}
+OUTCOME_FIELD_LABELS = {
+    "target_delivery_date": "Target Delivery Date", "rag_status": "RAG Status",
+    "rag_outcome": "RAG Outcome", "go_live_date": "Go Live Date",
+}
+
+# Field types, confirmed from real raw Jira data where a value was seen
+# populated (Complexity, PRP Status, Release Through, Priority — all
+# select-type with {"value": ...} shape). Fields that have ALWAYS been null
+# in every real issue we've inspected (PI, Delivery Data Confidence, RAG
+# Status, RAG Outcome) have their type marked "text" as a safe default —
+# confirmed-uncertain, since we've never seen a populated example. If Jira
+# rejects a text write to one of these, that error will tell us its real
+# type and we can correct it here.
+CR_FIELD_TYPES = {
+    "epic_link": "text", "complexity": "select", "funded_by": "text",
+    "baseline_target_delivery_date": "date", "baseline_prp_date": "date",
+    "actual_prp_start_date": "date", "prp_status": "select", "release_through": "select",
+    "target_delivery_date": "date", "reason_for_delay": "text", "blocked_by_dependency": "text",
+}
+EPIC_FIELD_TYPES = {
+    "due_date": "date", "target_delivery_date": "date", "description": "text",
+    "labels": "labels", "priority": "select",
+    "pi": "text",                       # unconfirmed — never seen populated
+    "delivery_data_confidence": "text",  # unconfirmed — never seen populated
+}
+OUTCOME_FIELD_TYPES = {
+    "target_delivery_date": "date",
+    "rag_status": "text",   # unconfirmed — never seen populated (likely select, e.g. Red/Amber/Green)
+    "rag_outcome": "text",  # unconfirmed — never seen populated
+    "go_live_date": "date",
+}
+
+# Options for confirmed select-type fields, taken from real values observed
+# (Complexity: "High" seen; PRP Status: "Not Started" seen; Release Through:
+# "Standard Release" seen) plus the standard remaining options for that kind
+# of field. Verify against Project Settings → Fields if any option is wrong.
+SELECT_OPTIONS = {
+    "complexity": ["Low", "Medium", "High"],
+    "prp_status": ["Not Started", "In Progress", "Complete"],
+    "release_through": ["Standard Release", "Hotfix"],
+    "priority": ["Highest", "High", "Medium", "Low", "Lowest"],
+}
+
+
+def format_field_value(field_key, field_type, raw_value):
+    """Shapes a plain value (as typed by a user) into what Jira's REST API
+    expects for that field type."""
+    if raw_value is None or raw_value == "":
+        return None
+    if field_type == "select":
+        return {"value": raw_value} if field_key != "priority" else {"name": raw_value}
+    if field_type == "labels":
+        if isinstance(raw_value, list):
+            return raw_value
+        return [v.strip() for v in raw_value.split(",") if v.strip()]
+    return raw_value  # text, date — Jira accepts these as plain strings
+
 # Statuses past which "overdue date" checks no longer apply — a delivered
 # item with a target date in the past isn't overdue, it's just history.
 TERMINAL_STATUSES_CR = {"DELIVERY COMPLETE"}

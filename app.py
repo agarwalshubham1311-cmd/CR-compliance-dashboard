@@ -808,6 +808,91 @@ def check_single_issue_fields():
     return jsonify({"issue_key": issue_key, "status": status_name, "findings": findings})
 
 
+_FIELD_MAPS = {
+    "cr": (field_rules.CR_FIELDS, field_rules.CR_FIELD_LABELS, field_rules.CR_FIELD_TYPES),
+    "epic": (field_rules.EPIC_FIELDS, field_rules.EPIC_FIELD_LABELS, field_rules.EPIC_FIELD_TYPES),
+    "outcome": (field_rules.OUTCOME_FIELDS, field_rules.OUTCOME_FIELD_LABELS, field_rules.OUTCOME_FIELD_TYPES),
+}
+
+
+@app.route("/api/entities/<entity_type>/<entity_key>/fields", methods=["GET"])
+def get_entity_current_fields(entity_type, entity_key):
+    """Returns EVERY field for this entity type with its current value —
+    not just the ones flagged as missing/invalid — so the dashboard can
+    show every field as editable, pre-filled where a value already exists."""
+    if entity_type not in _FIELD_MAPS:
+        return jsonify({"error": "entity_type must be cr, epic, or outcome"}), 400
+    field_ids, labels, types = _FIELD_MAPS[entity_type]
+
+    try:
+        raw = jira_rest.get_issue_raw(entity_key)
+    except Exception as e:
+        return jsonify({"error": f"Could not fetch issue: {e}"}), 500
+
+    fields = raw.get("fields", {})
+    result = []
+    for key, field_id in field_ids.items():
+        value = field_rules._value(fields, field_id)
+        result.append({
+            "key": key, "field_id": field_id, "label": labels.get(key, key),
+            "type": types.get(key, "text"), "value": value,
+            "options": field_rules.SELECT_OPTIONS.get(key),
+        })
+    return jsonify({"entity_key": entity_key, "fields": result})
+
+
+@app.route("/api/jira/transitions/<issue_key>", methods=["GET"])
+def get_transitions(issue_key):
+    try:
+        transitions = jira_rest.get_available_transitions(issue_key)
+    except Exception as e:
+        return jsonify({"error": f"Could not fetch transitions: {e}"}), 500
+    return jsonify({"issue_key": issue_key, "transitions": transitions})
+
+
+@app.route("/api/jira/transition", methods=["POST"])
+def apply_transition():
+    body = request.get_json(silent=True) or {}
+    issue_key = body.get("issue_key")
+    transition_id = body.get("transition_id")
+    if not issue_key or not transition_id:
+        return jsonify({"error": "Provide issue_key and transition_id"}), 400
+    try:
+        result = jira_rest.transition_issue(issue_key, transition_id)
+    except Exception as e:
+        return jsonify({"error": f"Transition failed: {e}"}), 500
+    return jsonify({"transitioned": True, "issue_key": issue_key, **result})
+
+
+@app.route("/api/jira/update-field", methods=["POST"])
+def update_field():
+    body = request.get_json(silent=True) or {}
+    issue_key = body.get("issue_key")
+    entity_type = body.get("entity_type")
+    field_key = body.get("field_key")
+    value = body.get("value")
+    if not all([issue_key, entity_type, field_key]):
+        return jsonify({"error": "Provide issue_key, entity_type, field_key"}), 400
+    if entity_type not in _FIELD_MAPS:
+        return jsonify({"error": "entity_type must be cr, epic, or outcome"}), 400
+
+    field_ids, labels, types = _FIELD_MAPS[entity_type]
+    if field_key not in field_ids:
+        return jsonify({"error": f"Unknown field_key '{field_key}' for {entity_type}"}), 400
+
+    field_id = field_ids[field_key]
+    field_type = types.get(field_key, "text")
+    shaped_value = field_rules.format_field_value(field_key, field_type, value)
+
+    try:
+        result = jira_rest.update_issue_fields(issue_key, {field_id: shaped_value})
+    except Exception as e:
+        return jsonify({"error": f"Update failed: {e}. If this is a select field, "
+                                  f"the value/options here may not match Jira's real "
+                                  f"options — check Project Settings → Fields."}), 500
+    return jsonify({"updated": True, "issue_key": issue_key, "field_key": field_key, **result})
+
+
 @app.route("/api/mappings", methods=["GET"])
 def get_mappings():
     return jsonify(compliance_db.get_all_status_mappings())
@@ -830,6 +915,24 @@ def override_mapping():
     compliance_rules.learn_alias(status_type, raw_status, target_status)
     compliance_db.save_status_mapping(status_type, raw_status, target_status, "human", "manual override", "confirmed")
     return jsonify({"updated": True})
+
+
+@app.route("/api/dashboard/db-health", methods=["GET"])
+def db_health():
+    size_bytes = compliance_db.get_db_size_bytes()
+    return jsonify({
+        "size_bytes": size_bytes,
+        "size_mb": round(size_bytes / (1024 * 1024), 2),
+        "retention_days": int(os.environ.get("RETENTION_DAYS", 7)),
+    })
+
+
+@app.route("/api/dashboard/prune", methods=["POST"])
+def manual_prune():
+    days = int(request.args.get("days", os.environ.get("RETENTION_DAYS", 7)))
+    result = compliance_db.prune_old_runs(keep_days=days)
+    compliance_db.vacuum()
+    return jsonify(result)
 
 
 @app.route("/api/dashboard/refresh", methods=["POST"])
@@ -890,11 +993,20 @@ def dashboard_unresolve():
 def start_scheduler():
     from apscheduler.schedulers.background import BackgroundScheduler
     interval_minutes = int(os.environ.get("SCAN_INTERVAL_MINUTES", 15))
+    retention_days = int(os.environ.get("RETENTION_DAYS", 7))
+
+    def scan_and_prune():
+        run_async(_run_full_scan())
+        pruned = compliance_db.prune_old_runs(keep_days=retention_days)
+        if pruned["pruned_runs"] > 0:
+            print(f"[retention] pruned {pruned['pruned_runs']} runs older than {retention_days} days")
+
     scheduler = BackgroundScheduler()
-    scheduler.add_job(lambda: run_async(_run_full_scan()), "interval", minutes=interval_minutes)
+    scheduler.add_job(scan_and_prune, "interval", minutes=interval_minutes)
+    scheduler.add_job(compliance_db.vacuum, "interval", hours=24)
     scheduler.start()
     # Run once immediately on startup so the dashboard has data right away
-    run_async(_run_full_scan())
+    scan_and_prune()
     return scheduler
 
 
@@ -907,20 +1019,38 @@ def start_scheduler():
 @app.route("/api/ai/draft-comment", methods=["POST"])
 def ai_draft_comment():
     body = request.get_json(silent=True) or {}
-    story_key, cr_key = body.get("story_key"), body.get("cr_key")
-    if not story_key or not cr_key:
-        return jsonify({"error": "Provide story_key and cr_key"}), 400
+    mode = body.get("mode", "phase")
 
-    # Pull the latest known mismatch details for this pair from the DB
-    summary = compliance_db.get_latest_summary()
-    match = next((r for r in summary["active"]
-                  if r["story_key"] == story_key and r["cr_key"] == cr_key), None)
-    if not match:
-        return jsonify({"error": "No active mismatch found for that story/CR pair. Run a scan first."}), 404
+    if mode == "fields":
+        # Field-completeness comment: entity + list of missing/invalid fields.
+        # Frontend already has this data (from /api/fields/findings), so it's
+        # passed directly rather than re-queried here.
+        entity_key = body.get("entity_key")
+        entity_status = body.get("entity_status")
+        findings = body.get("findings") or []
+        if not entity_key or not findings:
+            return jsonify({"error": "Provide entity_key and findings"}), 400
+        try:
+            draft = ai_draft.draft_field_comment(entity_key, entity_status, findings)
+        except Exception as e:
+            return jsonify({"error": f"Local LLM call failed: {e}. Is Ollama running?"}), 500
+        return jsonify({"issue_key": entity_key, "draft": draft})
 
-    # Optionally enrich with the story's description for a more grounded draft
-    story_desc = ""
-    desc_result = run_async(_call_mcp_tool("jira_get_issue", {"issue_key": story_key}))
+    # Phase-mismatch comment: any two-entity comparison (Story/CR, Epic/CR,
+    # Story/Outcome). Frontend passes the specific row's data directly —
+    # avoids needing pair-type-aware lookup logic here.
+    target_key = body.get("target_key")
+    target_status = body.get("target_status")
+    other_key = body.get("other_key")
+    other_status = body.get("other_status")
+    reason = body.get("reason")
+    severity = body.get("severity")
+    if not target_key or not other_key:
+        return jsonify({"error": "Provide target_key and other_key"}), 400
+
+    # Optionally enrich with the target's description for a more grounded draft
+    target_desc = ""
+    desc_result = run_async(_call_mcp_tool("jira_get_issue", {"issue_key": target_key}))
     if isinstance(desc_result, list):
         import json as _json
         for block in desc_result:
@@ -929,20 +1059,20 @@ def ai_draft_comment():
                 continue
             try:
                 parsed = _json.loads(text)
-                story_desc = parsed.get("description", "")
+                target_desc = parsed.get("description", "")
                 break
             except Exception:
                 continue
 
     try:
         draft = ai_draft.draft_remediation_comment(
-            story_key=story_key, story_status=match["story_status"], story_desc=story_desc,
-            cr_key=cr_key, cr_status=match["cr_status"], reason=match["reason"], severity=match["severity"],
+            target_key=target_key, target_status=target_status, target_desc=target_desc,
+            other_key=other_key, other_status=other_status, reason=reason, severity=severity,
         )
     except Exception as e:
-        return jsonify({"error": f"Local LLM call failed: {e}. Is Ollama running (ollama serve)?"}), 500
+        return jsonify({"error": f"Local LLM call failed: {e}. Is Ollama running?"}), 500
 
-    return jsonify({"story_key": story_key, "cr_key": cr_key, "draft": draft})
+    return jsonify({"issue_key": target_key, "draft": draft})
 
 
 @app.route("/api/ai/post-comment", methods=["POST"])

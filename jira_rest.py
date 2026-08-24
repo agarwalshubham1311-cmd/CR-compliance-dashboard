@@ -37,13 +37,60 @@ def get_issue_raw(issue_key):
     bypassing mcp-atlassian's curated field subset — so custom fields
     (Complexity, RAG Status, etc.) are available for compliance checks.
     Raises on missing credentials or a failed request."""
+    _require_creds()
+    url = f"{JIRA_URL.rstrip('/')}/rest/api/3/issue/{issue_key}"
+    resp = requests.get(url, auth=HTTPBasicAuth(JIRA_USERNAME, JIRA_API_TOKEN), timeout=30)
+    resp.raise_for_status()
+    return resp.json()
+
+
+def _require_creds():
     if not all([JIRA_URL, JIRA_USERNAME, JIRA_API_TOKEN]):
         raise RuntimeError(
             "JIRA_URL / JIRA_USERNAME / JIRA_API_TOKEN must be set in the Flask "
             "app's own environment (not just jira.env for the Docker container) "
             "for direct field access to work."
         )
-    url = f"{JIRA_URL.rstrip('/')}/rest/api/3/issue/{issue_key}"
-    resp = requests.get(url, auth=HTTPBasicAuth(JIRA_USERNAME, JIRA_API_TOKEN), timeout=30)
+
+
+def _auth():
+    return HTTPBasicAuth(JIRA_USERNAME, JIRA_API_TOKEN)
+
+
+def get_available_transitions(issue_key):
+    """Returns the list of statuses this issue can ACTUALLY move to right
+    now, per Jira's own workflow — never a hardcoded guess. Each entry:
+    {"id": "...", "name": "...", "to_status": "..."}"""
+    _require_creds()
+    url = f"{JIRA_URL.rstrip('/')}/rest/api/3/issue/{issue_key}/transitions"
+    resp = requests.get(url, auth=_auth(), timeout=30)
     resp.raise_for_status()
-    return resp.json()
+    transitions = resp.json().get("transitions", [])
+    return [
+        {"id": t["id"], "name": t.get("name", ""), "to_status": t.get("to", {}).get("name", "")}
+        for t in transitions
+    ]
+
+
+def transition_issue(issue_key, transition_id):
+    """Applies a transition by ID (from get_available_transitions) — never
+    by status name directly, since Jira requires the specific transition
+    ID, and validating against the real available list prevents silently
+    failed or wrong-workflow writes."""
+    _require_creds()
+    url = f"{JIRA_URL.rstrip('/')}/rest/api/3/issue/{issue_key}/transitions"
+    resp = requests.post(url, json={"transition": {"id": transition_id}}, auth=_auth(), timeout=30)
+    resp.raise_for_status()
+    return {"success": True}
+
+
+def update_issue_fields(issue_key, fields_payload):
+    """fields_payload: dict of {field_id: value}, already shaped correctly
+    for Jira's REST API (see field_rules.format_field_value) — e.g. a
+    select-type field needs {"value": "High"}, plain text/dates are the
+    raw value, labels are a list."""
+    _require_creds()
+    url = f"{JIRA_URL.rstrip('/')}/rest/api/3/issue/{issue_key}"
+    resp = requests.put(url, json={"fields": fields_payload}, auth=_auth(), timeout=30)
+    resp.raise_for_status()
+    return {"success": True}
