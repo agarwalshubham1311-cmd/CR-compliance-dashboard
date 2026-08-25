@@ -33,12 +33,11 @@ services:
     container_name: compliance-dashboard
     ports:
       - "5000:5000"
+    env_file:
+      - jira.env
     environment:
       - MCP_SERVER_URL=http://jira-mcp:8000/sse
       - OLLAMA_URL=http://ollama:11434/v1/chat/completions
-      - JIRA_URL=${JIRA_URL}
-      - JIRA_USERNAME=${JIRA_USERNAME}
-      - JIRA_API_TOKEN=${JIRA_API_TOKEN}
       - SCAN_INTERVAL_MINUTES=${SCAN_INTERVAL_MINUTES:-15}
       - RETENTION_DAYS=${RETENTION_DAYS:-7}
     volumes:
