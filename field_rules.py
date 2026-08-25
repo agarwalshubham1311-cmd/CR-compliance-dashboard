@@ -2,7 +2,8 @@
 Field-level compliance rules — structurally different from compliance.py:
 these check ONE entity's data quality, not alignment between two entities.
 
-Field IDs confirmed against real TPOC-12 (CR) and TPOC-68 (Outcome) issues.
+Field IDs confirmed against real TPOC-12 (CR), TPOC-44 (Epic), TPOC-68
+(Outcome) issues.
 """
 import datetime
 
@@ -27,11 +28,6 @@ OUTCOME_FIELDS = {
     "go_live_date": "customfield_10116",
 }
 
-# Epic fields confirmed to exist (native Jira fields + the shared Target Delivery
-# Date custom field already confirmed for CR/Outcome). "PI" and "Delivery Data
-# Confidence" are NOT yet included — their customfield IDs haven't been confirmed
-# against a real Epic issue yet (same discovery step used for every other field:
-# GET /rest/api/3/issue/<EPIC-KEY>?expand=names, search the "names" block).
 EPIC_FIELDS = {
     "due_date": "duedate",
     "target_delivery_date": "customfield_10184",  # Epic's OWN field — distinct from CR/Outcome's customfield_10112
@@ -42,7 +38,75 @@ EPIC_FIELDS = {
     "delivery_data_confidence": "customfield_10185",
 }
 
-# Statuses past which "overdue date" checks no longer apply — a delivered
+# Human-readable labels for each field key, used by the /api/entities/*
+# endpoint and the editable-fields UI.
+CR_FIELD_LABELS = {
+    "epic_link": "Epic Link", "complexity": "Complexity", "funded_by": "Funded By",
+    "baseline_target_delivery_date": "Baseline Target Delivery Date",
+    "baseline_prp_date": "Baseline PRP Date", "actual_prp_start_date": "Actual PRP Start Date",
+    "prp_status": "PRP Status", "release_through": "Release Through",
+    "target_delivery_date": "Target Delivery Date", "reason_for_delay": "Reason for Delay",
+    "blocked_by_dependency": "Blocked by/Dependency",
+}
+EPIC_FIELD_LABELS = {
+    "due_date": "Due Date", "target_delivery_date": "Target Delivery Date",
+    "description": "Description", "labels": "Labels", "priority": "Priority",
+    "pi": "PI", "delivery_data_confidence": "Delivery Data Confidence",
+}
+OUTCOME_FIELD_LABELS = {
+    "target_delivery_date": "Target Delivery Date", "rag_status": "RAG Status",
+    "rag_outcome": "RAG Outcome", "go_live_date": "Go Live Date",
+}
+
+# Field types, confirmed from real raw Jira data where a value was seen
+# populated (Complexity, PRP Status, Release Through, Priority — all
+# select-type with {"value": ...} shape). Fields never seen populated
+# (PI, Delivery Data Confidence, RAG Status, RAG Outcome) default to
+# "text" — if a write is rejected, the error reveals the real type.
+CR_FIELD_TYPES = {
+    "epic_link": "text", "complexity": "select", "funded_by": "text",
+    "baseline_target_delivery_date": "date", "baseline_prp_date": "date",
+    "actual_prp_start_date": "date", "prp_status": "select", "release_through": "select",
+    "target_delivery_date": "date", "reason_for_delay": "text", "blocked_by_dependency": "text",
+}
+EPIC_FIELD_TYPES = {
+    "due_date": "date", "target_delivery_date": "date", "description": "text",
+    "labels": "labels", "priority": "select",
+    "pi": "text",                        # unconfirmed — never seen populated
+    "delivery_data_confidence": "text",  # unconfirmed — never seen populated
+}
+OUTCOME_FIELD_TYPES = {
+    "target_delivery_date": "date",
+    "rag_status": "text",   # unconfirmed — never seen populated (likely select)
+    "rag_outcome": "text",  # unconfirmed — never seen populated
+    "go_live_date": "date",
+}
+
+# Options for confirmed select-type fields, taken from real values observed.
+# Verify against Project Settings -> Fields if any option is wrong.
+SELECT_OPTIONS = {
+    "complexity": ["Low", "Medium", "High"],
+    "prp_status": ["Not Started", "In Progress", "Complete"],
+    "release_through": ["Standard Release", "Hotfix"],
+    "priority": ["Highest", "High", "Medium", "Low", "Lowest"],
+}
+
+
+def format_field_value(field_key, field_type, raw_value):
+    """Shapes a plain value (as typed by a user) into what Jira's REST API
+    expects for that field type."""
+    if raw_value is None or raw_value == "":
+        return None
+    if field_type == "select":
+        return {"value": raw_value} if field_key != "priority" else {"name": raw_value}
+    if field_type == "labels":
+        if isinstance(raw_value, list):
+            return raw_value
+        return [v.strip() for v in raw_value.split(",") if v.strip()]
+    return raw_value  # text, date — Jira accepts these as plain strings
+
+
+# Statuses past which "overdue date" checks no longer apply - a delivered
 # item with a target date in the past isn't overdue, it's just history.
 TERMINAL_STATUSES_CR = {"DELIVERY COMPLETE"}
 TERMINAL_STATUSES_OUTCOME = {"DONE", "LIVE - FEATURE SWITCHED ON", "LIVE - FEATURE SWITCHED OFF"}

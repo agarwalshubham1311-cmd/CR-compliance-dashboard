@@ -10,3 +10,5 @@ start.ps1
 docker-compose.yml
 Dockerfile.jira-mcp
 Dockerfile.ollama
+frontend/node_modules/
+frontend/dist/

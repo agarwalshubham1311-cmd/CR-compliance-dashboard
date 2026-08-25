@@ -1,0 +1,69 @@
+body { font-family: sans-serif; max-width: 1150px; margin: 30px auto; padding: 0 16px; color: #1a1a1a; }
+.toolbar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+.version-tag { background: #e6f0fb; color: #185fa5; font-size: 12px; padding: 3px 10px; border-radius: 6px; display: inline-block; margin-bottom: 14px; }
+#status { font-size: 12px; color: #888; margin-right: 10px; }
+button { padding: 6px 12px; font-size: 13px; cursor: pointer; border: 1px solid #ccc; background: #fff; border-radius: 6px; }
+button:hover { background: #f4f4f4; }
+select, input[type="date"], input[type="text"] { font-size: 13px; padding: 5px 8px; border-radius: 6px; border: 1px solid #ccc; }
+
+.tabs { display: flex; gap: 4px; border-bottom: 1px solid #e0e0e0; margin-bottom: 20px; }
+.tabbtn { border: none; border-radius: 0; background: none; padding: 10px 16px; font-size: 14px; color: #666; border-bottom: 2px solid transparent; }
+.tabbtn:hover { background: none; color: #185fa5; }
+.tabbtn.active { color: #185fa5; border-bottom: 2px solid #185fa5; }
+.tabbtn .count { font-size: 11px; padding: 1px 6px; border-radius: 8px; margin-left: 4px; background: #eee; color: #666; }
+.tabbtn.active .count { background: #fdecea; color: #c0392b; }
+
+.cards { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 20px; }
+.card { background: #f4f4f4; border-radius: 8px; padding: 14px; }
+.card.danger { background: #fdecea; }
+.card p.label { font-size: 12px; color: #666; margin: 0 0 4px; }
+.card p.value { font-size: 24px; font-weight: 600; margin: 0; }
+.card.danger p.value { color: #c0392b; }
+
+.charts { display: flex; gap: 12px; margin-bottom: 20px; }
+.chart-box { flex: 1; background: #f4f4f4; border-radius: 8px; padding: 12px; height: 190px; }
+.chart-box p.title { font-size: 13px; color: #666; margin: 0 0 8px; }
+
+.filters { display: flex; gap: 8px; margin-bottom: 14px; flex-wrap: wrap; }
+
+.table-wrap { background: #fafafa; border: 1px solid #e0e0e0; border-radius: 10px; overflow: hidden; margin-bottom: 20px; }
+.table-header { display: flex; justify-content: space-between; align-items: center; padding: 12px 16px; border-bottom: 1px solid #e0e0e0; }
+.table-header p { margin: 0; font-size: 15px; font-weight: 600; }
+table { width: 100%; border-collapse: collapse; font-size: 13px; table-layout: fixed; }
+th { text-align: left; padding: 8px 12px; color: #666; font-weight: 600; }
+td { padding: 8px 12px; border-top: 1px solid #eee; }
+tr.data-row { cursor: pointer; }
+tr.data-row:hover { background: #f0f4fa; }
+a.key-link { color: #185fa5; text-decoration: none; }
+.badge { padding: 2px 8px; border-radius: 6px; font-size: 12px; display: inline-block; }
+.badge-reason { background: #fdecea; color: #c0392b; }
+.badge-Critical { background: #fdecea; color: #c0392b; }
+.badge-High { background: #fdf0d9; color: #b5720a; }
+.badge-Medium { background: #e6f0fb; color: #185fa5; }
+.badge-Low { background: #eee; color: #555; }
+.chevron { color: #999; text-align: right; }
+
+.detail-row td { background: #f7f7f7; padding: 0; }
+.detail-inner { padding: 16px 20px; }
+.detail-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin: 12px 0; font-size: 12px; }
+.detail-grid span.k { color: #999; }
+.detail-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.detail-actions a { font-size: 12px; color: #185fa5; text-decoration: none; }
+
+#draftBox { display: block; background: #fffbe6; border: 1px solid #f0e0a0; border-radius: 8px; padding: 14px; margin: 12px 0 20px; }
+#draftBox textarea { width: 100%; min-height: 80px; font-family: inherit; font-size: 13px; padding: 8px; box-sizing: border-box; }
+#draftBox .actions { margin-top: 8px; display: flex; gap: 8px; }
+#draftStatus { font-size: 12px; color: #888; margin: 6px 0 0; }
+
+#statusBox { background: #e6f0fb; border: 1px solid #185fa5; border-radius: 8px; padding: 14px; margin: 12px 0 20px; }
+
+.empty { text-align: center; color: #999; padding: 24px 12px; }
+
+.field-row { display: flex; align-items: center; gap: 10px; padding: 8px 0; border-top: 1px solid #e6e6e6; font-size: 13px; }
+.field-row .field-label { width: 220px; flex-shrink: 0; font-weight: 500; }
+.field-row .field-state { width: 60px; flex-shrink: 0; font-size: 11px; }
+.field-row .field-state.set { color: #185fa5; }
+.field-row .field-state.unset { color: #c0392b; }
+.field-row .field-msg { font-size: 12px; flex: 1; }
+.field-row .field-msg.overdue { color: #c0392b; }
+.field-row .field-msg.ok { color: #888; }

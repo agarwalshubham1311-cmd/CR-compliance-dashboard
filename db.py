@@ -89,6 +89,43 @@ def init_db():
     conn.close()
 
 
+def prune_old_runs(keep_days=7):
+    """Delete runs (and their checks/field_findings) older than keep_days.
+    status_mappings and resolutions are NOT tied to a run — they persist
+    indefinitely regardless of pruning, since they represent durable
+    learned/human state, not scan history."""
+    cutoff = time.time() - (keep_days * 86400)
+    conn = get_conn()
+    old_run_ids = [r[0] for r in conn.execute("SELECT run_id FROM runs WHERE started_at < ?", (cutoff,))]
+    if not old_run_ids:
+        conn.close()
+        return {"pruned_runs": 0}
+
+    placeholders = ",".join("?" * len(old_run_ids))
+    conn.execute(f"DELETE FROM checks WHERE run_id IN ({placeholders})", old_run_ids)
+    conn.execute(f"DELETE FROM field_findings WHERE run_id IN ({placeholders})", old_run_ids)
+    conn.execute(f"DELETE FROM runs WHERE run_id IN ({placeholders})", old_run_ids)
+    conn.commit()
+    conn.close()
+    return {"pruned_runs": len(old_run_ids)}
+
+
+def vacuum():
+    """Reclaims disk space SQLite doesn't automatically release after
+    DELETEs. Briefly locks the DB — call infrequently (e.g. daily), not
+    on every scan."""
+    conn = get_conn()
+    conn.execute("VACUUM")
+    conn.close()
+
+
+def get_db_size_bytes():
+    try:
+        return os.path.getsize(DB_PATH)
+    except OSError:
+        return 0
+
+
 def save_run(results):
     """results: list of dicts with cr_key, cr_status, story_key, story_status,
     compliant, reason, severity, score, and optionally pair_type (defaults
