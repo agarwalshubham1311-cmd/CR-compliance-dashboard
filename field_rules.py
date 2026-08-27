@@ -115,14 +115,46 @@ TERMINAL_STATUSES_OUTCOME = {"DONE", "LIVE - FEATURE SWITCHED ON", "LIVE - FEATU
 BLOCKED_ALIASES = {"BLOCKED", "ON HOLD"}
 
 
+def _adf_to_text(node):
+    """Extract plain text from an Atlassian Document Format (ADF) value —
+    used by rich-text custom fields. Description was already known to be
+    ADF; "Reason for Delay" and "Blocked by/Dependency" turned out to be
+    ADF too (not plain text as originally assumed), which is what caused
+    them to display as "[object Object]" before this fix."""
+    if not isinstance(node, dict):
+        return None
+    texts = []
+
+    def _walk(n):
+        if isinstance(n, dict):
+            if n.get("type") == "text" and n.get("text"):
+                texts.append(n["text"])
+            for child in n.get("content", []):
+                _walk(child)
+        elif isinstance(n, list):
+            for item in n:
+                _walk(item)
+
+    _walk(node)
+    joined = " ".join(texts).strip()
+    return joined or None
+
+
 def _value(fields, field_id):
     """Normalize a raw Jira field value. Select-type custom fields come
-    back as {'value': ...}; plain fields (dates, text) are strings."""
+    back as {'value': ...}; rich-text fields come back as ADF (nested
+    dict with type/content); plain fields (dates, text) are strings.
+    Any other unrecognized object shape returns None rather than leaking
+    the raw dict to a caller expecting a displayable value."""
     raw = fields.get(field_id)
     if raw is None:
         return None
-    if isinstance(raw, dict) and "value" in raw:
-        return raw["value"]
+    if isinstance(raw, dict):
+        if "value" in raw:
+            return raw["value"]
+        if raw.get("type") == "doc":
+            return _adf_to_text(raw)
+        return None  # unrecognized object shape — don't leak it as a display value
     if isinstance(raw, str):
         return raw.strip() or None
     return raw
@@ -188,25 +220,9 @@ def check_cr_fields(fields, status_name):
 
 
 def _description_text(raw):
-    """Jira's native description field is Atlassian Document Format (nested
-    JSON), not a plain string. Extract whether there's any actual text in it."""
-    if not raw or not isinstance(raw, dict):
-        return None
-    texts = []
-
-    def _walk(node):
-        if isinstance(node, dict):
-            if node.get("type") == "text" and node.get("text"):
-                texts.append(node["text"])
-            for child in node.get("content", []):
-                _walk(child)
-        elif isinstance(node, list):
-            for item in node:
-                _walk(item)
-
-    _walk(raw)
-    joined = " ".join(texts).strip()
-    return joined or None
+    """Kept as a thin alias — same ADF-parsing logic as _adf_to_text,
+    used specifically for Epic's description field."""
+    return _adf_to_text(raw)
 
 
 def check_epic_fields(fields, status_name):
