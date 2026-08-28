@@ -1,0 +1,102 @@
+/* ---- design tokens (translated from the mockup's palette) ---- */
+:root {
+  --font-voice: Georgia, 'Times New Roman', serif;
+  --text-primary: #1a1a1a;
+  --text-secondary: #52514e;
+  --text-muted: #898781;
+  --text-accent: #185fa5;
+  --text-danger: #791f1f;
+  --text-warning: #633806;
+  --surface-1: #f4f4f2;
+  --surface-2: #fafaf9;
+  --border: #e1e0d9;
+  --bg-danger: #fcebeb;
+  --bg-warning: #faeeda;
+  --bg-accent: #e6f0fb;
+  --radius: 6px;
+  --red: #d03b3b; --red-dark: #791f1f; --red-bg: #fcebeb;
+  --amber: #c98500; --amber-dark: #633806; --amber-bg: #faeeda;
+  --blue: #2a78d6; --blue-dark: #185fa5; --blue-bg: #e6f0fb;
+  --gray: #898781; --gray-dark: #52514e; --gray-bg: #eeeeec;
+}
+
+body { font-family: sans-serif; max-width: 1150px; margin: 30px auto; padding: 0 16px; color: var(--text-primary); }
+
+.toolbar { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 8px; }
+.toolbar h2 { font-size: 22px; font-weight: 500; margin: 0; }
+.toolbar .subtitle { font-size: 13px; color: var(--text-muted); margin: 2px 0 0; }
+.version-tag { background: var(--bg-accent); color: var(--text-accent); font-size: 12px; padding: 3px 10px; border-radius: var(--radius); display: inline-block; margin-bottom: 14px; }
+#status { font-size: 12px; color: var(--text-muted); margin-right: 10px; }
+
+button { padding: 7px 14px; font-size: 13px; cursor: pointer; border: 0.5px solid var(--border); background: var(--surface-2); border-radius: var(--radius); color: var(--text-primary); }
+button:hover { background: var(--surface-1); }
+select, input[type="date"], input[type="text"] { font-size: 13px; padding: 6px 10px; border-radius: var(--radius); border: 0.5px solid var(--border); background: var(--surface-2); }
+
+.tabs { display: inline-flex; gap: 4px; background: var(--surface-1); border-radius: 8px; padding: 4px; margin-bottom: 20px; }
+.tabbtn { border: none; background: none; padding: 8px 16px; font-size: 13px; color: var(--text-secondary); border-radius: 6px; }
+.tabbtn:hover { background: none; color: var(--text-accent); }
+.tabbtn.active { background: var(--surface-2); color: var(--text-primary); box-shadow: 0 1px 2px rgba(0,0,0,0.06); }
+.tabbtn .count { font-size: 12px; margin-left: 5px; color: var(--text-muted); }
+.tabbtn .count.has-issues { color: var(--red); font-weight: 500; }
+
+.cards { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 20px; }
+.card { background: var(--surface-1); border-radius: var(--radius); padding: 1rem; }
+.card.danger { background: var(--bg-danger); }
+.card p.label { font-size: 13px; color: var(--text-secondary); margin: 0 0 6px; }
+.card p.value { font-family: var(--font-voice); font-size: 28px; font-weight: 400; margin: 0; }
+.card.danger p.value { color: var(--red-dark); }
+
+.charts { display: flex; gap: 12px; margin-bottom: 20px; }
+.chart-box { flex: 1; background: var(--surface-1); border-radius: var(--radius); padding: 14px; height: 180px; }
+.chart-box p.title { font-size: 13px; color: var(--text-secondary); margin: 0 0 8px; }
+
+.filters { display: flex; gap: 8px; margin-bottom: 14px; flex-wrap: wrap; }
+
+.table-wrap { background: var(--surface-2); border: 0.5px solid var(--border); border-radius: 12px; overflow: hidden; margin-bottom: 20px; }
+.table-header { display: flex; justify-content: space-between; align-items: center; padding: 14px 18px; border-bottom: 0.5px solid var(--border); }
+.table-header p { margin: 0; font-size: 15px; font-weight: 500; }
+table { width: 100%; border-collapse: collapse; font-size: 13px; table-layout: fixed; }
+th { text-align: left; padding: 8px 18px; color: var(--text-secondary); font-weight: 500; }
+td { padding: 10px 18px; border-top: 0.5px solid var(--border); }
+tr.data-row { cursor: pointer; }
+tr.data-row:hover { background: var(--surface-1); }
+a.key-link { color: var(--text-accent); text-decoration: none; }
+
+.reason { display: inline-flex; align-items: center; gap: 6px; color: var(--text-secondary); }
+.reason i { font-size: 14px; }
+.reason.behind i, .reason.blocked i { color: var(--red); }
+.reason.ahead i { color: var(--amber); }
+.reason.withdrawn i, .reason.unmapped i { color: var(--gray); }
+
+.badge { padding: 2px 9px; border-radius: var(--radius); font-size: 12px; display: inline-block; }
+.badge-Critical { background: var(--red-bg); color: var(--red-dark); }
+.badge-High { background: var(--amber-bg); color: var(--amber-dark); }
+.badge-Medium { background: var(--blue-bg); color: var(--blue-dark); }
+.badge-Low { background: var(--gray-bg); color: var(--gray-dark); }
+.chevron { color: var(--text-muted); text-align: right; }
+
+.detail-row td { background: var(--surface-1); padding: 0; }
+.detail-inner { padding: 16px 20px 20px 44px; }
+.detail-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin: 0 0 14px; font-size: 12px; }
+.detail-grid span.k { color: var(--text-muted); }
+.detail-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.detail-actions a { font-size: 13px; color: var(--text-accent); text-decoration: none; display: inline-flex; align-items: center; gap: 4px; margin-left: auto; }
+.detail-actions i { font-size: 14px; margin-right: 5px; }
+
+#draftBox { background: var(--bg-warning); border: 0.5px solid #f0e0a0; border-radius: var(--radius); padding: 14px; margin: 12px 0 20px; }
+#draftBox textarea { width: 100%; min-height: 80px; font-family: inherit; font-size: 13px; padding: 8px; box-sizing: border-box; border-radius: var(--radius); border: 0.5px solid var(--border); }
+#draftBox .actions { margin-top: 8px; display: flex; gap: 8px; }
+#draftStatus { font-size: 12px; color: var(--text-muted); margin: 6px 0 0; }
+
+#statusBox { background: var(--bg-accent); border: 0.5px solid var(--blue); border-radius: var(--radius); padding: 14px; margin: 12px 0 20px; }
+
+.empty { text-align: center; color: var(--text-muted); padding: 28px 12px; }
+
+.field-row { display: flex; align-items: center; gap: 10px; padding: 9px 0; border-top: 0.5px solid var(--border); font-size: 13px; }
+.field-row .field-label { width: 220px; flex-shrink: 0; font-weight: 500; }
+.field-row .field-state { width: 60px; flex-shrink: 0; font-size: 11px; }
+.field-row .field-state.set { color: var(--text-accent); }
+.field-row .field-state.unset { color: var(--red); }
+.field-row .field-msg { font-size: 12px; flex: 1; }
+.field-row .field-msg.overdue { color: var(--red); }
+.field-row .field-msg.ok { color: var(--text-muted); }

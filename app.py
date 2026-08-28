@@ -537,6 +537,67 @@ CR_DISCOVERY_JQL = os.environ.get("CR_DISCOVERY_JQL", 'labels = "CR"')
 OUTCOME_DISCOVERY_JQL = os.environ.get("OUTCOME_DISCOVERY_JQL", 'issuetype = "Outcome"')
 EPIC_DISCOVERY_JQL = os.environ.get("EPIC_DISCOVERY_JQL", 'issuetype = "Epic"')
 
+# How many direct-REST fetches (jira_rest.get_issue_raw) run concurrently.
+# These are blocking HTTP calls, moved off the event loop via
+# asyncio.to_thread and batched — at 10k+ records, doing these one at a
+# time sequentially was the dominant cost in scan time. Bounded rather
+# than unlimited so we don't hammer Jira / trip rate limits.
+CONCURRENT_FETCH_LIMIT = int(os.environ.get("CONCURRENT_FETCH_LIMIT", 8))
+
+
+async def _search_all_issues(session, jql, max_pages=50):
+    """jira_search only returns one page by default, which silently
+    truncates results on any query returning more than a page's worth —
+    a real correctness bug at 10k+ record scale, not just a performance
+    one. Loops using the tool's next_page_token until exhausted (or
+    max_pages, as a safety cap against an infinite loop if something's
+    wrong), returning every matching issue."""
+    import json as _json
+    all_issues = []
+    page_token = None
+    for _ in range(max_pages):
+        args = {"jql": jql}
+        if page_token:
+            args["page_token"] = page_token
+        result = await session.call_tool("jira_search", args)
+        page_token = None
+        for block in [b.model_dump() for b in result.content]:
+            text = block.get("text")
+            if not text:
+                continue
+            try:
+                parsed = _json.loads(text)
+                all_issues.extend(parsed.get("issues", []))
+                page_token = parsed.get("next_page_token")
+            except Exception:
+                pass
+        if not page_token:
+            break
+    return all_issues
+
+
+async def _fetch_raw_concurrent(keys):
+    """Fetch raw Jira data (for field-completeness checks) for multiple
+    issues concurrently instead of one blocking call at a time. Each
+    fetch runs in a thread (jira_rest uses the synchronous `requests`
+    library) so it doesn't block the event loop while waiting; a
+    semaphore caps how many run at once. Returns {key: raw_json_or_None} —
+    a None value means that specific fetch failed and was logged, not
+    that the whole batch failed."""
+    sem = asyncio.Semaphore(CONCURRENT_FETCH_LIMIT)
+    results = {}
+
+    async def _one(key):
+        async with sem:
+            try:
+                results[key] = await asyncio.to_thread(jira_rest.get_issue_raw, key)
+            except Exception as e:
+                print(f"[jira_rest] could not fetch {key}: {e}")
+                results[key] = None
+
+    await asyncio.gather(*(_one(k) for k in keys))
+    return results
+
 
 def _ensure_classified(status_type, raw_status):
     """If this status isn't already understood (natively or via a learned
@@ -569,7 +630,9 @@ async def _run_full_scan():
     import json as _json
     import uuid as _uuid
     import datetime
+    import time as _time
 
+    scan_start = _time.time()
     field_run_id = str(_uuid.uuid4())
     results = []
     field_findings_by_entity = []  # [(entity_type, entity_key, entity_status, findings)]
@@ -581,29 +644,21 @@ async def _run_full_scan():
         async with ClientSession(read, write) as session:
             await session.initialize()
 
-            cr_search = await session.call_tool("jira_search", {"jql": CR_DISCOVERY_JQL})
-            crs = []
-            for block in [b.model_dump() for b in cr_search.content]:
-                text = block.get("text")
-                if not text:
-                    continue
-                try:
-                    crs = _json.loads(text).get("issues", [])
-                except Exception:
-                    pass
+            crs = await _search_all_issues(session, CR_DISCOVERY_JQL)
+            print(f"[scan] discovered {len(crs)} CRs, fetching field data concurrently...")
+            cr_raw_by_key = await _fetch_raw_concurrent([cr.get("key") for cr in crs])
 
             for cr in crs:
                 cr_key = cr.get("key")
                 cr_status = (cr.get("status") or {}).get("name")
                 _ensure_classified("cr", cr_status)
 
-                # Field-completeness check for this CR — direct REST call,
-                # since custom fields don't come through the MCP tool's
-                # curated response. Also reused to find the CR's Epic Link
-                # for the Epic<-CR bottleneck check below, avoiding a
-                # second fetch per CR.
-                try:
-                    raw = jira_rest.get_issue_raw(cr_key)
+                # Field-completeness check for this CR — uses the raw data
+                # already fetched concurrently above, no extra blocking call
+                # here. Also reused to find the CR's Epic Link for the
+                # Epic<-CR bottleneck check below.
+                raw = cr_raw_by_key.get(cr_key)
+                if raw is not None:
                     raw_fields = raw.get("fields", {})
                     cr_findings = field_rules.check_cr_fields(raw_fields, cr_status)
                     field_findings_by_entity.append(("cr", cr_key, cr_status, cr_findings))
@@ -616,21 +671,8 @@ async def _run_full_scan():
                         epic_key = raw_fields.get(field_rules.CR_FIELDS["epic_link"])
                     if epic_key:
                         epic_to_cr_entries.setdefault(epic_key, []).append((cr_key, cr_status))
-                except Exception as e:
-                    print(f"[field_rules] could not check CR {cr_key}: {e}")
 
-                link_search = await session.call_tool(
-                    "jira_search", {"jql": f'issue in linkedIssues("{cr_key}")'}
-                )
-                linked = []
-                for block in [b.model_dump() for b in link_search.content]:
-                    text = block.get("text")
-                    if not text:
-                        continue
-                    try:
-                        linked = _json.loads(text).get("issues", [])
-                    except Exception:
-                        pass
+                linked = await _search_all_issues(session, f'issue in linkedIssues("{cr_key}")')
 
                 for issue in linked:
                     if (issue.get("issue_type") or {}).get("name") != "Story":
@@ -661,28 +703,19 @@ async def _run_full_scan():
                     })
 
             # Epic <- CR bottleneck check, using the Epic Links collected above.
-            epic_search = await session.call_tool("jira_search", {"jql": EPIC_DISCOVERY_JQL})
-            epics = []
-            for block in [b.model_dump() for b in epic_search.content]:
-                text = block.get("text")
-                if not text:
-                    continue
-                try:
-                    epics = _json.loads(text).get("issues", [])
-                except Exception:
-                    pass
+            epics = await _search_all_issues(session, EPIC_DISCOVERY_JQL)
+            print(f"[scan] discovered {len(epics)} Epics, fetching field data concurrently...")
+            epic_raw_by_key = await _fetch_raw_concurrent([epic.get("key") for epic in epics])
 
             for epic in epics:
                 epic_key = epic.get("key")
                 epic_status = (epic.get("status") or {}).get("name")
                 _ensure_classified("epic", epic_status)
 
-                try:
-                    raw = jira_rest.get_issue_raw(epic_key)
+                raw = epic_raw_by_key.get(epic_key)
+                if raw is not None:
                     epic_findings = field_rules.check_epic_fields(raw.get("fields", {}), epic_status)
                     field_findings_by_entity.append(("epic", epic_key, epic_status, epic_findings))
-                except Exception as e:
-                    print(f"[field_rules] could not check Epic {epic_key}: {e}")
 
                 cr_entries = epic_to_cr_entries.get(epic_key, [])
                 verdict = compliance_rules.evaluate_epic(epic_status, cr_entries)
@@ -697,40 +730,21 @@ async def _run_full_scan():
                 })
 
             # Outcome field-completeness + Story <- Outcome phase alignment
-            outcome_search = await session.call_tool("jira_search", {"jql": OUTCOME_DISCOVERY_JQL})
-            outcomes = []
-            for block in [b.model_dump() for b in outcome_search.content]:
-                text = block.get("text")
-                if not text:
-                    continue
-                try:
-                    outcomes = _json.loads(text).get("issues", [])
-                except Exception:
-                    pass
+            outcomes = await _search_all_issues(session, OUTCOME_DISCOVERY_JQL)
+            print(f"[scan] discovered {len(outcomes)} Outcomes, fetching field data concurrently...")
+            outcome_raw_by_key = await _fetch_raw_concurrent([o.get("key") for o in outcomes])
 
             for outcome in outcomes:
                 outcome_key = outcome.get("key")
                 outcome_status = (outcome.get("status") or {}).get("name")
                 _ensure_classified("outcome", outcome_status)
-                try:
-                    raw = jira_rest.get_issue_raw(outcome_key)
+
+                raw = outcome_raw_by_key.get(outcome_key)
+                if raw is not None:
                     outcome_findings = field_rules.check_outcome_fields(raw.get("fields", {}), outcome_status)
                     field_findings_by_entity.append(("outcome", outcome_key, outcome_status, outcome_findings))
-                except Exception as e:
-                    print(f"[field_rules] could not check Outcome {outcome_key}: {e}")
 
-                outcome_link_search = await session.call_tool(
-                    "jira_search", {"jql": f'issue in linkedIssues("{outcome_key}")'}
-                )
-                outcome_linked = []
-                for block in [b.model_dump() for b in outcome_link_search.content]:
-                    text = block.get("text")
-                    if not text:
-                        continue
-                    try:
-                        outcome_linked = _json.loads(text).get("issues", [])
-                    except Exception:
-                        pass
+                outcome_linked = await _search_all_issues(session, f'issue in linkedIssues("{outcome_key}")')
 
                 for issue in outcome_linked:
                     if (issue.get("issue_type") or {}).get("name") != "Story":
@@ -754,6 +768,12 @@ async def _run_full_scan():
     for entity_type, entity_key, entity_status, findings in field_findings_by_entity:
         compliance_db.save_field_findings(field_run_id, entity_type, entity_key, entity_status, findings)
 
+    elapsed = _time.time() - scan_start
+    print(f"[scan] completed in {elapsed:.1f}s — "
+          f"{len(set(r['cr_key'] for r in results))} CRs, {len(results)} story checks, "
+          f"{len(epic_results)} epic checks, {len(outcome_results)} outcome checks, "
+          f"{len(field_findings_by_entity)} entities field-checked")
+
     return {
         "crs_scanned": len(set(r["cr_key"] for r in results)),
         "stories_scanned": len(results),
@@ -761,6 +781,7 @@ async def _run_full_scan():
         "outcomes_scanned": len(outcome_results),
         "field_entities_scanned": len(field_findings_by_entity),
         "field_findings_total": sum(len(f) for _, _, _, f in field_findings_by_entity),
+        "scan_seconds": round(elapsed, 1),
     }
 
 
