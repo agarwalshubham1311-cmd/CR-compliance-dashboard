@@ -1,14 +1,56 @@
 import asyncio
+import logging
 import os
+import socket
+import time
+from pathlib import Path
+from urllib.parse import urlparse
 
 from flask import Flask, jsonify, request, send_from_directory
 from mcp import ClientSession
 from mcp.client.sse import sse_client
 
+
+def _load_local_env_file(env_file_name: str = "jira.env"):
+    """Load dotenv-style values for local runs (Docker already injects env)."""
+    env_path = Path(__file__).with_name(env_file_name)
+    if not env_path.is_file():
+        return
+
+    for raw_line in env_path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip()
+        if not key or key in os.environ:
+            continue
+        if (value.startswith('"') and value.endswith('"')) or (value.startswith("'") and value.endswith("'")):
+            value = value[1:-1]
+        os.environ[key] = value
+
+
+_load_local_env_file()
+
 app = Flask(__name__, static_folder="static", static_url_path="")
+logger = logging.getLogger("compliance.scope")
+
+# Keep logging lightweight and opt-in via LOG_LEVEL/COMPLIANCE_SCOPE_LOG_LEVEL.
+if not logging.getLogger().handlers:
+    logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO").upper())
+logger.setLevel(os.environ.get("COMPLIANCE_SCOPE_LOG_LEVEL", os.environ.get("LOG_LEVEL", "INFO")).upper())
 
 # URL of the jira-mcp container's SSE endpoint (set MCP_SERVER_URL env var to override)
 MCP_SERVER_URL = os.environ.get("MCP_SERVER_URL", "http://localhost:8000/sse")
+
+DEFAULT_CR_DISCOVERY_JQL = 'labels = "CR"'
+CR_DISCOVERY_JQL = os.environ.get("CR_DISCOVERY_JQL", DEFAULT_CR_DISCOVERY_JQL)
+DEFAULT_PROJECT_KEY = os.environ.get("DEFAULT_PROJECT_KEY", "ACC").strip().upper()
+ASSIGNEE_SCOPE_CACHE_TTL_SEC = int(os.environ.get("ASSIGNEE_SCOPE_CACHE_TTL_SEC", "180"))
+_ASSIGNEE_SCOPE_CACHE = {}
+SCOPED_SCAN_MAX_CRS = int(os.environ.get("SCOPED_SCAN_MAX_CRS", "150"))
+ASSIGNEE_DISCOVERY_MAX_ISSUES = int(os.environ.get("ASSIGNEE_DISCOVERY_MAX_ISSUES", "600"))
 
 import db as compliance_db
 import compliance as compliance_rules
@@ -75,6 +117,371 @@ def is_compliant(cr_status, story_status):
     return (story_key in allowed), "phase_mapping"
 
 
+def _jira_browse_base():
+    jira_url = (os.environ.get("JIRA_URL") or "").strip().rstrip("/")
+    return f"{jira_url}/browse/" if jira_url else ""
+
+
+def _severity_rank(severity):
+    return {"Critical": 3, "High": 2, "Medium": 1, "Low": 0, "OK": -1}.get(severity, -1)
+
+
+def _assignee_name(issue):
+    assignee = (issue or {}).get("assignee") or {}
+    return (assignee.get("displayName") or assignee.get("name") or "").strip()
+
+
+def _normalize_assignee(value):
+    return (value or "").strip().lower()
+
+
+def _effective_project_key(project_key: str | None, board_id: str | None):
+    """When a board is selected, board scope takes precedence over project scope."""
+    return None if board_id else project_key
+
+
+def _issue_type_name(issue):
+    return (((issue or {}).get("issue_type") or {}).get("name") or "").strip().upper()
+
+
+def _is_story_issue(issue):
+    issue_type = _issue_type_name(issue)
+    return issue_type == "STORY" or issue_type == "USER STORY" or issue_type.endswith(" STORY")
+
+
+def _is_cr_issue(issue):
+    issue_type = _issue_type_name(issue)
+    return issue_type in {"CR", "CHANGE REQUEST"}
+
+
+def _has_cr_label(issue):
+    labels = (issue or {}).get("labels") or []
+    return any(str(label).strip().upper() == "CR" for label in labels)
+
+
+def _filter_active_rows(active_rows, scoped_cr_keys, board_story_keys=None):
+    total_active_rows = len(active_rows or [])
+    cr_scope_count = len(scoped_cr_keys or set())
+    board_story_count = len(board_story_keys) if board_story_keys is not None else None
+
+    rows = [row for row in active_rows if row.get("cr_key") in scoped_cr_keys]
+    rows_after_cr_scope = len(rows)
+    if board_story_keys is not None:
+        rows = [row for row in rows if row.get("story_key") in board_story_keys]
+    rows_after_board_scope = len(rows)
+    rows_after_scope = len(rows)
+
+    logger.info(
+        "[scope_filter] active=%s cr_scope=%s board_story_scope=%s -> after_cr=%s after_board=%s",
+        total_active_rows,
+        cr_scope_count,
+        board_story_count if board_story_count is not None else "-",
+        rows_after_cr_scope,
+        rows_after_board_scope,
+    )
+
+    # This warning pinpoints the exact filter stage that collapsed the result to zero.
+    if total_active_rows > 0 and rows_after_scope == 0:
+        logger.warning(
+            "[scope_filter_zero] Result became zero after filtering. details={active:%s, cr_scope:%s, board_story_scope:%s, after_cr:%s, after_board:%s}",
+            total_active_rows,
+            cr_scope_count,
+            board_story_count if board_story_count is not None else "-",
+            rows_after_cr_scope,
+            rows_after_board_scope,
+        )
+    return rows
+
+
+def _parse_first_json_block(content_blocks):
+    import json as _json
+
+    for block in content_blocks:
+        text = block.get("text")
+        if not text:
+            continue
+        try:
+            return _json.loads(text)
+        except Exception:
+            continue
+    return None
+
+
+def _parse_issues_from_content(content_blocks):
+    parsed = _parse_first_json_block(content_blocks)
+    if isinstance(parsed, dict):
+        issues = parsed.get("issues")
+        if isinstance(issues, list):
+            return issues
+    return []
+
+
+async def _jira_search_issues(session, jql: str):
+    result = await session.call_tool("jira_search", {"jql": jql})
+    return _parse_issues_from_content([block.model_dump() for block in result.content])
+
+
+async def _search_issues_with_fallback(jql: str, session=None, max_results: int = 200):
+    mcp_error = None
+    if session is not None:
+        try:
+            return await _jira_search_issues(session, jql)
+        except Exception as exc:
+            mcp_error = exc
+            print(f"[jira_search] MCP search failed for JQL {jql!r}; falling back to direct Jira REST: {exc}")
+
+    try:
+        return await asyncio.to_thread(jira_rest.search_issues, jql, max_results)
+    except Exception:
+        if mcp_error is not None:
+            raise mcp_error
+        raise
+
+
+def _scope_jql(jql: str, project_key: str | None = None):
+    if not project_key:
+        return jql
+    project = project_key.strip().upper()
+    if not project:
+        return jql
+    return f'(project = "{project}") AND ({jql})'
+
+
+def _cr_discovery_jql_candidates(project_key: str | None = None):
+    project_key = _effective_project_key(project_key, None)
+    custom_jql_configured = "CR_DISCOVERY_JQL" in os.environ
+    candidate_jqls = [_scope_jql(CR_DISCOVERY_JQL, project_key)]
+    if not custom_jql_configured:
+        candidate_jqls.extend([
+            _scope_jql('issuetype = "Change Request"', project_key),
+            _scope_jql('issuetype = "CR"', project_key),
+        ])
+    return candidate_jqls, custom_jql_configured
+
+
+async def _discover_crs(session, project_key: str | None = None, board_id: str | None = None):
+    project_key = _effective_project_key(project_key, board_id)
+    candidate_jqls, custom_jql_configured = _cr_discovery_jql_candidates(project_key)
+
+    if board_id:
+        board_last_error = None
+        for jql in candidate_jqls:
+            try:
+                board_issues = await asyncio.to_thread(jira_rest.search_board_issues, board_id, jql, 500)
+                if board_issues:
+                    return board_issues, f'board = {board_id} AND ({jql})'
+                if custom_jql_configured and jql == _scope_jql(CR_DISCOVERY_JQL, project_key):
+                    return [], f'board = {board_id} AND ({jql})'
+            except Exception as exc:
+                board_last_error = exc
+                continue
+        if board_last_error:
+            print(f"[cr_discovery] board-scoped search failed for board {board_id}: {board_last_error}; falling back to JQL")
+
+    seen = set()
+    last_error = None
+    for jql in candidate_jqls:
+        if jql in seen:
+            continue
+        seen.add(jql)
+        try:
+            issues = await _search_issues_with_fallback(jql, session=session)
+            if issues:
+                if jql != CR_DISCOVERY_JQL:
+                    print(f"[cr_discovery] using fallback JQL: {jql}")
+                return issues, jql
+            if custom_jql_configured and jql == _scope_jql(CR_DISCOVERY_JQL, project_key):
+                return [], jql
+        except Exception as exc:
+            last_error = exc
+            continue
+
+    if last_error:
+        raise last_error
+    return [], _scope_jql(CR_DISCOVERY_JQL, project_key)
+
+
+async def _discover_crs_for_scope(project_key: str | None = None, board_id: str | None = None):
+    """Resolve CR keys for a project/board scope, with MCP then direct REST fallback."""
+    project_key = _effective_project_key(project_key, board_id)
+    try:
+        async with sse_client(MCP_SERVER_URL) as (read, write):
+            async with ClientSession(read, write) as session:
+                await session.initialize()
+                crs, used_jql = await _discover_crs(session, project_key=project_key, board_id=board_id)
+                logger.info(
+                    "[scope_cr_discovery] source=mcp project=%s board=%s cr_count=%s jql=%r",
+                    project_key or "-",
+                    board_id or "-",
+                    len(crs or []),
+                    used_jql,
+                )
+                return crs, used_jql
+    except Exception as exc:
+        print(f"[summary_scope] MCP unavailable for scoped CR discovery; using direct Jira REST fallback: {exc}")
+        candidate_jqls, custom_jql_configured = _cr_discovery_jql_candidates(project_key)
+        if board_id:
+            for jql in candidate_jqls:
+                crs = await asyncio.to_thread(jira_rest.search_board_issues, board_id, jql, 500)
+                if crs:
+                    logger.info(
+                        "[scope_cr_discovery] source=rest-board project=%s board=%s cr_count=%s jql=%r",
+                        project_key or "-",
+                        board_id or "-",
+                        len(crs),
+                        jql,
+                    )
+                    return crs, f'board = {board_id} AND ({jql})'
+                if custom_jql_configured and jql == _scope_jql(CR_DISCOVERY_JQL, project_key):
+                    logger.warning(
+                        "[scope_cr_discovery_zero] source=rest-board project=%s board=%s cr_count=0 jql=%r",
+                        project_key or "-",
+                        board_id or "-",
+                        jql,
+                    )
+                    return [], f'board = {board_id} AND ({jql})'
+            return [], f'board = {board_id} AND ({candidate_jqls[0]})'
+
+        for jql in candidate_jqls:
+            crs = await _search_issues_with_fallback(jql, session=None)
+            if crs:
+                return crs, jql
+            if custom_jql_configured and jql == _scope_jql(CR_DISCOVERY_JQL, project_key):
+                return [], jql
+        return [], candidate_jqls[0]
+
+
+async def _discover_board_story_keys(board_id: str | None):
+    """Return all Story issue keys currently visible in a board."""
+    if not board_id:
+        return None
+    try:
+        issues = await asyncio.to_thread(
+            jira_rest.search_board_issues,
+            board_id,
+            None,
+            1000,
+            ["issuetype"],
+        )
+    except Exception as exc:
+        print(f"[board_scope] story key discovery failed for board {board_id}: {exc}")
+        logger.exception("[board_scope] story key discovery failed for board=%s", board_id)
+        return set()
+    story_keys = {i.get("key") for i in issues if i.get("key") and _is_story_issue(i)}
+    logger.info(
+        "[board_scope] board=%s board_issues=%s story_keys=%s",
+        board_id,
+        len(issues or []),
+        len(story_keys),
+    )
+    if issues and not story_keys:
+        logger.warning("[board_scope_zero] board=%s has issues but no story keys matched issue type filters", board_id)
+    return story_keys
+
+
+async def _discover_assignees_for_scope(project_key: str | None = None, board_id: str | None = None):
+    """Collect unique assignees for CR/Story issues in the selected scope.
+
+    Uses board-scoped direct queries (fast) and falls back to project-scoped
+    search when board_id is not provided.
+    """
+    project_key = _effective_project_key(project_key, board_id)
+    cache_key = (project_key or "", board_id or "")
+    now = time.time()
+    cached = _ASSIGNEE_SCOPE_CACHE.get(cache_key)
+    if cached and (now - cached.get("ts", 0)) <= ASSIGNEE_SCOPE_CACHE_TTL_SEC:
+        return cached["value"]
+
+    assignees = {}
+    used_jqls = []
+
+    def _add_assignee(issue):
+        name = _assignee_name(issue)
+        if not name:
+            return
+        key = name.lower()
+        if key not in assignees:
+            assignees[key] = {"name": name}
+
+    # Board scope: fetch board issues once and derive assignees directly.
+    if board_id:
+        try:
+            board_issues = await asyncio.to_thread(
+                jira_rest.search_board_issues,
+                board_id,
+                None,
+                ASSIGNEE_DISCOVERY_MAX_ISSUES,
+                ["assignee", "issuetype", "labels"],
+            )
+            for issue in board_issues:
+                if _is_story_issue(issue) or _is_cr_issue(issue) or _has_cr_label(issue):
+                    _add_assignee(issue)
+            used_jqls.append(f"board:{board_id}:all-issues(limit={ASSIGNEE_DISCOVERY_MAX_ISSUES})")
+        except Exception as exc:
+            print(f"[jira_assignees] board query failed for board {board_id}: {exc}")
+    else:
+        # Project/global scope without board restriction.
+        project_prefix = f'project = "{project_key}" AND ' if project_key else ""
+        jqls = [
+            f"{project_prefix}({CR_DISCOVERY_JQL})",
+            f'{project_prefix}(issuetype = "Change Request")',
+            f'{project_prefix}(issuetype = "CR")',
+            f'{project_prefix}(issuetype = "Story")',
+            f'{project_prefix}(issuetype = "User Story")',
+        ]
+        seen = set()
+        for jql in jqls:
+            if jql in seen:
+                continue
+            seen.add(jql)
+            try:
+                issues = await _search_issues_with_fallback(jql, session=None, max_results=1000)
+                for issue in issues:
+                    _add_assignee(issue)
+                used_jqls.append(jql)
+            except Exception as exc:
+                print(f"[jira_assignees] project query failed for jql={jql!r}: {exc}")
+                continue
+
+    response = {
+        "items": sorted(assignees.values(), key=lambda a: a["name"].lower()),
+        "jql": "; ".join(used_jqls[:6]),
+    }
+    _ASSIGNEE_SCOPE_CACHE[cache_key] = {"ts": now, "value": response}
+    return response
+
+
+def _build_cr_dashboard_rows(crs, cr_field_findings):
+    findings_by_key = {}
+    for finding in cr_field_findings:
+        findings_by_key.setdefault(finding.get("entity_key"), []).append(finding)
+
+    rows = []
+    for cr in crs:
+        key = cr.get("key")
+        if not key:
+            continue
+        findings = findings_by_key.get(key, [])
+        max_severity = "OK"
+        if findings:
+            max_severity = max(
+                (finding.get("severity") or "Low" for finding in findings),
+                key=_severity_rank,
+            )
+        rows.append({
+            "key": key,
+            "summary": cr.get("summary") or "",
+            "status": (cr.get("status") or {}).get("name") or "-",
+            "assignee": _assignee_name(cr),
+            "issue_count": len(findings),
+            "max_severity": max_severity,
+            "field_findings": findings,
+        })
+
+    rows.sort(key=lambda row: (-row["issue_count"], -_severity_rank(row["max_severity"]), row["key"]))
+    return rows
+
+
 # ---------------------------------------------------------------------------
 # Core MCP call helper
 # ---------------------------------------------------------------------------
@@ -115,10 +522,56 @@ def run_async(coro):
     try:
         return asyncio.run(coro)
     except Exception as e:
+        real_errors = _flatten(e)
+        error_text = "; ".join(real_errors)
+        if (
+            "AuthenticationError" in error_text
+            or "Unauthorized (401)" in error_text
+            or "Authentication failed for Jira API (403)" in error_text
+        ):
+            return {
+                "error": (
+                    "Jira authentication failed. Check JIRA_URL, JIRA_USERNAME, and "
+                    "JIRA_PASSWORD (or JIRA_API_TOKEN), then restart the containers."
+                )
+            }
         print("=== run_async error ===")
         traceback.print_exc()
-        real_errors = _flatten(e)
-        return {"error": "; ".join(real_errors)}
+        return {"error": error_text}
+
+
+def _warn_if_mcp_unreachable():
+    """Best-effort startup probe so connection failures are obvious in logs."""
+    if not _is_mcp_port_reachable(timeout_seconds=5):
+        print(f"[startup] Could not connect to MCP endpoint {MCP_SERVER_URL}")
+
+
+def _mcp_host_port():
+    parsed = urlparse(MCP_SERVER_URL)
+    host = parsed.hostname or "localhost"
+    if parsed.port:
+        return host, parsed.port
+    return host, 443 if parsed.scheme == "https" else 80
+
+
+def _is_mcp_port_reachable(timeout_seconds=5):
+    host, port = _mcp_host_port()
+    try:
+        with socket.create_connection((host, port), timeout=timeout_seconds):
+            return True
+    except OSError:
+        return False
+
+
+def _wait_for_mcp_ready(max_attempts=10, sleep_seconds=2):
+    """Retry a few times so first scan doesn't fail during container warm-up."""
+    for attempt in range(1, max_attempts + 1):
+        if _is_mcp_port_reachable(timeout_seconds=5):
+            return True
+        print(f"[startup] MCP not ready yet ({attempt}/{max_attempts}); retrying in {sleep_seconds}s")
+        time.sleep(sleep_seconds)
+    print(f"[startup] MCP still unavailable after {max_attempts} attempts; skipping initial scan")
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -128,6 +581,80 @@ def run_async(coro):
 @app.route("/api/tools", methods=["GET"])
 def list_tools():
     result = run_async(_list_mcp_tools())
+    if isinstance(result, dict) and "error" in result:
+        return jsonify(result), 500
+    return jsonify(result)
+
+
+@app.route("/api/health/jira-auth", methods=["GET"])
+def health_jira_auth():
+    """Health check for dashboard Jira auth path (direct REST + optional MCP)."""
+    jira_health = jira_rest.check_jira_auth()
+
+    mcp_health = {
+        "reachable": _is_mcp_port_reachable(timeout_seconds=3),
+        "endpoint": MCP_SERVER_URL,
+    }
+
+    if mcp_health["reachable"]:
+        mcp_tools = run_async(_list_mcp_tools())
+        if isinstance(mcp_tools, dict) and "error" in mcp_tools:
+            mcp_health["ok"] = False
+            mcp_health["error"] = mcp_tools["error"]
+        else:
+            mcp_health["ok"] = True
+            mcp_health["tool_count"] = len(mcp_tools)
+    else:
+        mcp_health["ok"] = False
+        mcp_health["error"] = "MCP endpoint not reachable"
+
+    body = {
+        "jira": jira_health,
+        "mcp": mcp_health,
+    }
+    code = 200 if jira_health.get("ok") else 503
+    return jsonify(body), code
+
+
+@app.route("/api/config", methods=["GET"])
+def client_config():
+    return jsonify({
+        "jira_browse_base": _jira_browse_base(),
+        "cr_discovery_jql": CR_DISCOVERY_JQL,
+        "default_project_key": DEFAULT_PROJECT_KEY,
+    })
+
+
+@app.route("/api/jira/projects", methods=["GET"])
+def jira_projects():
+    try:
+        projects = jira_rest.list_projects()
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500
+
+    projects.sort(key=lambda p: (p.get("key") != DEFAULT_PROJECT_KEY, p.get("name") or p.get("key") or ""))
+    return jsonify({"items": projects, "default_project_key": DEFAULT_PROJECT_KEY})
+
+
+@app.route("/api/jira/boards", methods=["GET"])
+def jira_boards():
+    project_key = (request.args.get("project_key") or "").strip().upper() or None
+    try:
+        boards = jira_rest.list_boards(project_key=project_key)
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500
+
+    boards.sort(key=lambda b: (b.get("name") or "").lower())
+    return jsonify({"items": boards, "project_key": project_key})
+
+
+@app.route("/api/jira/assignees", methods=["GET"])
+def jira_assignees():
+    project_key = (request.args.get("project_key") or "").strip().upper() or None
+    board_id = (request.args.get("board_id") or "").strip() or None
+    project_key = _effective_project_key(project_key, board_id)
+
+    result = run_async(_discover_assignees_for_scope(project_key=project_key, board_id=board_id))
     if isinstance(result, dict) and "error" in result:
         return jsonify(result), 500
     return jsonify(result)
@@ -151,7 +678,7 @@ def call_tool_generic(tool_name):
 # ---------------------------------------------------------------------------
 
 # READ: get a single issue
-@app.route("/api/issues/<issue_key>", methods=["GET"])
+@app.route("/api/2/issues/<issue_key>", methods=["GET"])
 def get_issue(issue_key):
     result = run_async(_call_mcp_tool("jira_get_issue", {"issue_key": issue_key}))
     if isinstance(result, dict) and "error" in result:
@@ -207,7 +734,7 @@ def add_comment(issue_key):
 
 
 # WRITE: transition an issue's status (e.g. To Do -> In Progress)
-@app.route("/api/issues/<issue_key>/transition", methods=["POST"])
+@app.route("/api/2/issues/<issue_key>/transition", methods=["POST"])
 def transition_issue(issue_key):
     body = request.get_json(silent=True) or {}
     if "transition" not in body:
@@ -533,7 +1060,6 @@ def cr_mismatches():
 # This is what the scheduler calls on a timer, and what /refresh calls
 # on demand.
 # ---------------------------------------------------------------------------
-CR_DISCOVERY_JQL = os.environ.get("CR_DISCOVERY_JQL", 'labels = "CR"')
 OUTCOME_DISCOVERY_JQL = os.environ.get("OUTCOME_DISCOVERY_JQL", 'issuetype = "Outcome"')
 EPIC_DISCOVERY_JQL = os.environ.get("EPIC_DISCOVERY_JQL", 'issuetype = "Epic"')
 
@@ -565,7 +1091,7 @@ def _ensure_classified(status_type, raw_status):
     print(f"[ai_classify] learned: {status_type} '{raw_status}' -> '{result['target']}' ({result.get('confidence')})")
 
 
-async def _run_full_scan():
+async def _run_full_scan(project_key: str | None = None, board_id: str | None = None):
     import json as _json
     import uuid as _uuid
     import datetime
@@ -576,25 +1102,26 @@ async def _run_full_scan():
     epic_to_cr_entries = {}  # epic_key -> [(cr_key, cr_status), ...]
     epic_results = []
     outcome_results = []
+    board_story_keys = await _discover_board_story_keys(board_id)
+    board_scoped_mode = bool(board_id)
 
     async with sse_client(MCP_SERVER_URL) as (read, write):
         async with ClientSession(read, write) as session:
             await session.initialize()
 
-            cr_search = await session.call_tool("jira_search", {"jql": CR_DISCOVERY_JQL})
-            crs = []
-            for block in [b.model_dump() for b in cr_search.content]:
-                text = block.get("text")
-                if not text:
-                    continue
-                try:
-                    crs = _json.loads(text).get("issues", [])
-                except Exception:
-                    pass
+            crs, cr_discovery_jql = await _discover_crs(session, project_key=project_key, board_id=board_id)
+            if board_scoped_mode and SCOPED_SCAN_MAX_CRS > 0 and len(crs) > SCOPED_SCAN_MAX_CRS:
+                print(
+                    f"[scan] board-scoped CR list too large ({len(crs)}). "
+                    f"Limiting to first {SCOPED_SCAN_MAX_CRS} for refresh responsiveness."
+                )
+                crs = crs[:SCOPED_SCAN_MAX_CRS]
+            print(f"[cr_discovery] scan returned {len(crs)} CRs using JQL: {cr_discovery_jql}")
 
             for cr in crs:
                 cr_key = cr.get("key")
                 cr_status = (cr.get("status") or {}).get("name")
+                cr_assignee = _assignee_name(cr)
                 _ensure_classified("cr", cr_status)
 
                 # Field-completeness check for this CR — direct REST call,
@@ -619,23 +1146,17 @@ async def _run_full_scan():
                 except Exception as e:
                     print(f"[field_rules] could not check CR {cr_key}: {e}")
 
-                link_search = await session.call_tool(
-                    "jira_search", {"jql": f'issue in linkedIssues("{cr_key}")'}
+                linked = await _search_issues_with_fallback(
+                    f'issue in linkedIssues("{cr_key}")',
+                    session=session,
                 )
-                linked = []
-                for block in [b.model_dump() for b in link_search.content]:
-                    text = block.get("text")
-                    if not text:
-                        continue
-                    try:
-                        linked = _json.loads(text).get("issues", [])
-                    except Exception:
-                        pass
 
                 for issue in linked:
-                    if (issue.get("issue_type") or {}).get("name") != "Story":
+                    if not _is_story_issue(issue):
                         continue
                     story_key = issue.get("key")
+                    if board_story_keys is not None and story_key not in board_story_keys:
+                        continue
                     story_status = (issue.get("status") or {}).get("name")
                     _ensure_classified("story", story_status)
 
@@ -655,88 +1176,71 @@ async def _run_full_scan():
                     results.append({
                         "pair_type": "cr_story",
                         "cr_key": cr_key, "cr_status": cr_status,
+                        "cr_assignee": cr_assignee,
                         "story_key": story_key, "story_status": story_status,
+                        "story_assignee": _assignee_name(issue),
                         "compliant": verdict["compliant"], "reason": verdict["reason"],
                         "severity": verdict["severity"], "score": verdict["score"],
                     })
 
-            # Epic <- CR bottleneck check, using the Epic Links collected above.
-            epic_search = await session.call_tool("jira_search", {"jql": EPIC_DISCOVERY_JQL})
-            epics = []
-            for block in [b.model_dump() for b in epic_search.content]:
-                text = block.get("text")
-                if not text:
-                    continue
-                try:
-                    epics = _json.loads(text).get("issues", [])
-                except Exception:
-                    pass
+            if not board_scoped_mode:
+                # Epic <- CR bottleneck check, using the Epic Links collected above.
+                epics = await _search_issues_with_fallback(_scope_jql(EPIC_DISCOVERY_JQL, project_key), session=session)
 
-            for epic in epics:
-                epic_key = epic.get("key")
-                epic_status = (epic.get("status") or {}).get("name")
-                _ensure_classified("epic", epic_status)
-                cr_entries = epic_to_cr_entries.get(epic_key, [])
-                verdict = compliance_rules.evaluate_epic(epic_status, cr_entries)
-                if verdict["bottleneck_cr_key"] is None:
-                    continue  # no linked CRs — nothing to compare, skip rather than record a hollow row
-                epic_results.append({
-                    "pair_type": "epic_cr",
-                    "cr_key": verdict["bottleneck_cr_key"], "cr_status": verdict["bottleneck_cr_status"],
-                    "story_key": epic_key, "story_status": epic_status,
-                    "compliant": verdict["compliant"], "reason": verdict["reason"],
-                    "severity": verdict["severity"], "score": verdict["score"],
-                })
+                for epic in epics:
+                    epic_key = epic.get("key")
+                    epic_status = (epic.get("status") or {}).get("name")
+                    _ensure_classified("epic", epic_status)
+                    cr_entries = epic_to_cr_entries.get(epic_key, [])
+                    verdict = compliance_rules.evaluate_epic(epic_status, cr_entries)
+                    if verdict["bottleneck_cr_key"] is None:
+                        continue  # no linked CRs — nothing to compare, skip rather than record a hollow row
+                    epic_results.append({
+                        "pair_type": "epic_cr",
+                        "cr_key": verdict["bottleneck_cr_key"], "cr_status": verdict["bottleneck_cr_status"],
+                        "cr_assignee": None,
+                        "story_key": epic_key, "story_status": epic_status,
+                        "story_assignee": None,
+                        "compliant": verdict["compliant"], "reason": verdict["reason"],
+                        "severity": verdict["severity"], "score": verdict["score"],
+                    })
 
-            # Outcome field-completeness + Story <- Outcome phase alignment
-            outcome_search = await session.call_tool("jira_search", {"jql": OUTCOME_DISCOVERY_JQL})
-            outcomes = []
-            for block in [b.model_dump() for b in outcome_search.content]:
-                text = block.get("text")
-                if not text:
-                    continue
-                try:
-                    outcomes = _json.loads(text).get("issues", [])
-                except Exception:
-                    pass
+                # Outcome field-completeness + Story <- Outcome phase alignment
+                outcomes = await _search_issues_with_fallback(_scope_jql(OUTCOME_DISCOVERY_JQL, project_key), session=session)
 
-            for outcome in outcomes:
-                outcome_key = outcome.get("key")
-                outcome_status = (outcome.get("status") or {}).get("name")
-                _ensure_classified("outcome", outcome_status)
-                try:
-                    raw = jira_rest.get_issue_raw(outcome_key)
-                    outcome_findings = field_rules.check_outcome_fields(raw.get("fields", {}), outcome_status)
-                    field_findings_by_entity.append(("outcome", outcome_key, outcome_status, outcome_findings))
-                except Exception as e:
-                    print(f"[field_rules] could not check Outcome {outcome_key}: {e}")
-
-                outcome_link_search = await session.call_tool(
-                    "jira_search", {"jql": f'issue in linkedIssues("{outcome_key}")'}
-                )
-                outcome_linked = []
-                for block in [b.model_dump() for b in outcome_link_search.content]:
-                    text = block.get("text")
-                    if not text:
-                        continue
+                for outcome in outcomes:
+                    outcome_key = outcome.get("key")
+                    outcome_status = (outcome.get("status") or {}).get("name")
+                    _ensure_classified("outcome", outcome_status)
                     try:
-                        outcome_linked = _json.loads(text).get("issues", [])
-                    except Exception:
-                        pass
+                        raw = jira_rest.get_issue_raw(outcome_key)
+                        outcome_findings = field_rules.check_outcome_fields(raw.get("fields", {}), outcome_status)
+                        field_findings_by_entity.append(("outcome", outcome_key, outcome_status, outcome_findings))
+                    except Exception as e:
+                        print(f"[field_rules] could not check Outcome {outcome_key}: {e}")
 
-                for issue in outcome_linked:
-                    if (issue.get("issue_type") or {}).get("name") != "Story":
-                        continue
-                    story_key = issue.get("key")
-                    story_status = (issue.get("status") or {}).get("name")
-                    verdict = compliance_rules.evaluate_outcome(story_status, outcome_status)
-                    outcome_results.append({
-                        "pair_type": "story_outcome",
-                        "cr_key": story_key, "cr_status": story_status,
-                        "story_key": outcome_key, "story_status": outcome_status,
-                        "compliant": verdict["compliant"], "reason": verdict["reason"],
-                        "severity": verdict["severity"], "score": verdict["score"],
-                    })
+                    outcome_linked = await _search_issues_with_fallback(
+                        f'issue in linkedIssues("{outcome_key}")',
+                        session=session,
+                    )
+
+                    for issue in outcome_linked:
+                        if not _is_story_issue(issue):
+                            continue
+                        story_key = issue.get("key")
+                        story_status = (issue.get("status") or {}).get("name")
+                        verdict = compliance_rules.evaluate_outcome(story_status, outcome_status)
+                        outcome_results.append({
+                            "pair_type": "story_outcome",
+                            "cr_key": story_key, "cr_status": story_status,
+                            "cr_assignee": None,
+                            "story_key": outcome_key, "story_status": outcome_status,
+                            "story_assignee": None,
+                            "compliant": verdict["compliant"], "reason": verdict["reason"],
+                            "severity": verdict["severity"], "score": verdict["score"],
+                        })
+            else:
+                print("[scan] board-scoped refresh: skipped Epic/Outcome scans to reduce latency")
 
     run_id = compliance_db.save_run(results)
     if epic_results:
@@ -754,6 +1258,69 @@ async def _run_full_scan():
         "field_entities_scanned": len(field_findings_by_entity),
         "field_findings_total": sum(len(f) for _, _, _, f in field_findings_by_entity),
     }
+
+
+@app.route("/api/crs", methods=["GET"])
+def get_all_crs():
+    project_key = (request.args.get("project_key") or "").strip().upper() or None
+    board_id = (request.args.get("board_id") or "").strip() or None
+    project_key = _effective_project_key(project_key, board_id)
+    non_compliant_only = (request.args.get("non_compliant_only") or "").strip().lower() in {"1", "true", "yes"}
+
+    async def _load_crs():
+        try:
+            async with sse_client(MCP_SERVER_URL) as (read, write):
+                async with ClientSession(read, write) as session:
+                    await session.initialize()
+                    return await _discover_crs(session, project_key=project_key, board_id=board_id)
+        except Exception as exc:
+            print(f"[api/crs] MCP unavailable for CR discovery; using direct Jira REST fallback: {exc}")
+            candidate_jqls, custom_jql_configured = _cr_discovery_jql_candidates(project_key)
+            if board_id:
+                for jql in candidate_jqls:
+                    crs = await asyncio.to_thread(jira_rest.search_board_issues, board_id, jql, 500)
+                    if crs:
+                        return crs, f'board = {board_id} AND ({jql})'
+                    if custom_jql_configured and jql == _scope_jql(CR_DISCOVERY_JQL, project_key):
+                        return [], f'board = {board_id} AND ({jql})'
+                return [], f'board = {board_id} AND ({candidate_jqls[0]})'
+
+            for jql in candidate_jqls:
+                crs = await _search_issues_with_fallback(jql, session=None)
+                if crs:
+                    return crs, jql
+                if custom_jql_configured and jql == _scope_jql(CR_DISCOVERY_JQL, project_key):
+                    return [], jql
+            return [], candidate_jqls[0]
+
+    result = run_async(_load_crs())
+    if isinstance(result, dict) and "error" in result:
+        return jsonify(result), 500
+
+    crs, used_jql = result
+
+    if non_compliant_only:
+        summary = compliance_db.get_latest_summary()
+        board_story_keys = None
+        if board_id:
+            board_story_result = run_async(_discover_board_story_keys(board_id))
+            if isinstance(board_story_result, dict) and "error" in board_story_result:
+                return jsonify(board_story_result), 500
+            board_story_keys = board_story_result if isinstance(board_story_result, set) else set(board_story_result or [])
+        scoped_cr_keys = {cr.get("key") for cr in crs if cr.get("key")}
+        filtered_active = _filter_active_rows(
+            summary.get("active", []),
+            scoped_cr_keys,
+            board_story_keys=board_story_keys,
+        )
+        active_cr_keys = {row.get("cr_key") for row in filtered_active if row.get("cr_key")}
+        crs = [cr for cr in crs if cr.get("key") in active_cr_keys]
+
+    cr_findings = compliance_db.get_latest_field_findings("cr")
+    return jsonify({
+        "items": _build_cr_dashboard_rows(crs, cr_findings),
+        "jql": used_jql,
+    })
 
 
 @app.route("/api/pairs/epic-cr", methods=["GET"])
@@ -826,15 +1393,134 @@ def override_mapping():
 
 @app.route("/api/dashboard/refresh", methods=["POST"])
 def dashboard_refresh():
-    result = run_async(_run_full_scan())
+    body = request.get_json(silent=True) or {}
+    project_key = (body.get("project_key") or "").strip().upper() or None
+    board_id = str(body.get("board_id") or "").strip() or None
+    project_key = _effective_project_key(project_key, board_id)
+    logger.info(
+            "[_effective_project_key] project=%s board=%s ",
+            project_key or "-",
+            board_id or "-",
+        )
+    result = run_async(_run_full_scan(project_key=project_key, board_id=board_id))
+
     if isinstance(result, dict) and "error" in result:
         return jsonify(result), 500
+    logger.info(
+                "[_effective_project_key] project=%s result=%s ",
+                project_key or "-",
+                result or "-",
+            )
     return jsonify(result)
 
 
 @app.route("/api/dashboard/summary", methods=["GET"])
 def dashboard_summary():
-    return jsonify(compliance_db.get_latest_summary())
+    project_key = (request.args.get("project_key") or "").strip().upper() or None
+    board_id = (request.args.get("board_id") or "").strip() or None
+    project_key = _effective_project_key(project_key, board_id)
+    debug_enabled = (request.args.get("debug") or "").strip().lower() in {"1", "true", "yes"}
+    summary = compliance_db.get_latest_summary()
+    logger.info(
+        "[summary_scope_start] project=%s board=%s base_non_compliant=%s",
+        project_key or "-",
+        board_id or "-",
+        len(summary.get("active", [])),
+    )
+    logger.info(
+        "[summary_scope_start] project=%s board=%s Detailed summary=%s",
+        project_key or "-",
+        board_id or "-",
+        summary,
+    )
+
+    # If no scope is requested, preserve existing behavior.
+    if not project_key and not board_id:
+        return jsonify(summary)
+
+    scoped_cr_result = run_async(_discover_crs_for_scope(project_key=project_key, board_id=board_id))
+    if isinstance(scoped_cr_result, dict) and "error" in scoped_cr_result:
+        return jsonify(scoped_cr_result), 500
+
+    scoped_crs, used_jql = scoped_cr_result
+    scoped_cr_keys = {cr.get("key") for cr in scoped_crs if cr.get("key")}
+    board_story_keys = None
+
+    if board_id:
+        board_story_result = run_async(_discover_board_story_keys(board_id))
+        if isinstance(board_story_result, dict) and "error" in board_story_result:
+            return jsonify(board_story_result), 500
+        board_story_keys = board_story_result if isinstance(board_story_result, set) else set(board_story_result or [])
+        logger.info(
+            "[summary_scope_board] board=%s board_story_keys=%s",
+            board_id,
+            len(board_story_keys),
+        )
+
+    scoped_active = _filter_active_rows(
+        summary.get("active", []),
+        scoped_cr_keys,
+        board_story_keys=board_story_keys,
+    )
+
+    scoped_summary = dict(summary)
+    scoped_summary["active"] = scoped_active
+    scoped_summary["non_compliant"] = len(scoped_active)
+    non_compliant_cr_keys = sorted({row.get("cr_key") for row in scoped_active if row.get("cr_key")})
+    scoped_summary["scope"] = {
+        "project_key": project_key,
+        "board_id": board_id,
+        "cr_discovery_jql": used_jql,
+        "crs_in_scope": len(scoped_cr_keys),
+        "non_compliant_crs": len(non_compliant_cr_keys),
+    }
+    logger.info(
+        "[summary_scope_result] project=%s board=%s crs_in_scope=%s non_compliant_pairs=%s non_compliant_crs=%s",
+        project_key or "-",
+        board_id or "-",
+        len(scoped_cr_keys),
+        len(scoped_active),
+        len(non_compliant_cr_keys),
+    )
+
+    if board_id and (len(scoped_cr_keys) == 0 or len(scoped_active) == 0):
+        logger.warning(
+            "[summary_scope_zero] board=%s likely caused zero results. crs_in_scope=%s board_story_keys=%s non_compliant_pairs=%s jql=%r",
+            board_id,
+            len(scoped_cr_keys),
+            len(board_story_keys) if board_story_keys is not None else "-",
+            len(scoped_active),
+            used_jql,
+        )
+
+    # Scoped debugging for board/project selection issues.
+    print(
+        "[summary_scope] "
+        f"project={project_key or '-'} board={board_id or '-'} "
+        f"jql={used_jql!r} crs_in_scope={len(scoped_cr_keys)} "
+        f"non_compliant_pairs={len(scoped_active)} non_compliant_crs={len(non_compliant_cr_keys)}"
+    )
+    if non_compliant_cr_keys:
+        print(f"[summary_scope] non_compliant_cr_keys={', '.join(non_compliant_cr_keys)}")
+
+    if debug_enabled:
+        scoped_summary["scope_debug"] = {
+            "non_compliant_cr_keys": non_compliant_cr_keys,
+            "non_compliant_pairs_preview": [
+                {
+                    "cr_key": row.get("cr_key"),
+                    "cr_status": row.get("cr_status"),
+                    "story_key": row.get("story_key"),
+                    "story_status": row.get("story_status"),
+                    "cr_assignee": row.get("cr_assignee"),
+                    "story_assignee": row.get("story_assignee"),
+                    "reason": row.get("reason"),
+                    "severity": row.get("severity"),
+                }
+                for row in scoped_active[:50]
+            ],
+        }
+    return jsonify(scoped_summary)
 
 
 @app.route("/api/dashboard/trend", methods=["GET"])
@@ -880,13 +1566,22 @@ def dashboard_unresolve():
 # near-real-time state without the user manually clicking refresh.
 # ---------------------------------------------------------------------------
 def start_scheduler():
+    import threading
     from apscheduler.schedulers.background import BackgroundScheduler
     interval_minutes = int(os.environ.get("SCAN_INTERVAL_MINUTES", 15))
     scheduler = BackgroundScheduler()
     scheduler.add_job(lambda: run_async(_run_full_scan()), "interval", minutes=interval_minutes)
     scheduler.start()
-    # Run once immediately on startup so the dashboard has data right away
-    run_async(_run_full_scan())
+
+    # Run first scan in background so Flask starts serving /dashboard immediately.
+    def _initial_scan_worker():
+        if _wait_for_mcp_ready(
+            max_attempts=int(os.environ.get("MCP_READY_RETRIES", 10)),
+            sleep_seconds=int(os.environ.get("MCP_READY_RETRY_SECONDS", 2)),
+        ):
+            run_async(_run_full_scan())
+
+    threading.Thread(target=_initial_scan_worker, name="initial-scan", daemon=True).start()
     return scheduler
 
 

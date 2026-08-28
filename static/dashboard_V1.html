@@ -95,9 +95,9 @@ function renderTable(active) {
   active.sort((a,b) => b.score - a.score).forEach(d => {
     const tr = document.createElement('tr');
     tr.innerHTML = `
-      <td><a href="https://mastek-team-cuv3mazl.atlassian.net/browse/${d.story_key}" target="_blank">${d.story_key}</a></td>
+      <td><a href="https://jira.bics-collaboration.homeoffice.gov.uk/browse/${d.story_key}" target="_blank">${d.story_key}</a></td>
       <td>${d.story_status}</td>
-      <td><a href="https://mastek-team-cuv3mazl.atlassian.net/browse/${d.cr_key}" target="_blank">${d.cr_key}</a></td>
+      <td><a href="https://jira.bics-collaboration.homeoffice.gov.uk/browse/${d.cr_key}" target="_blank">${d.cr_key}</a></td>
       <td>${d.cr_status}</td>
       <td>${d.reason}</td>
       <td><span class="badge badge-${d.severity}">${d.severity}</span></td>

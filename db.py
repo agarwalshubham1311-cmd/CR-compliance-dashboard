@@ -29,8 +29,10 @@ def init_db():
             pair_type TEXT DEFAULT 'cr_story',
             cr_key TEXT,
             cr_status TEXT,
+            cr_assignee TEXT,
             story_key TEXT,
             story_status TEXT,
+            story_assignee TEXT,
             compliant INTEGER,
             reason TEXT,
             severity TEXT,
@@ -84,6 +86,10 @@ def init_db():
     existing_cols = [row[1] for row in conn.execute("PRAGMA table_info(checks)").fetchall()]
     if "pair_type" not in existing_cols:
         conn.execute("ALTER TABLE checks ADD COLUMN pair_type TEXT DEFAULT 'cr_story'")
+    if "cr_assignee" not in existing_cols:
+        conn.execute("ALTER TABLE checks ADD COLUMN cr_assignee TEXT")
+    if "story_assignee" not in existing_cols:
+        conn.execute("ALTER TABLE checks ADD COLUMN story_assignee TEXT")
 
     conn.commit()
     conn.close()
@@ -110,11 +116,12 @@ def save_run(results):
     )
     for r in results:
         conn.execute(
-            """INSERT INTO checks (run_id, pair_type, cr_key, cr_status, story_key, story_status,
-               compliant, reason, severity, score, checked_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (run_id, r.get("pair_type", "cr_story"), r["cr_key"], r["cr_status"], r["story_key"], r["story_status"],
-             int(r["compliant"]), r.get("reason"), r.get("severity"), r.get("score", 0), now),
+            """INSERT INTO checks (run_id, pair_type, cr_key, cr_status, cr_assignee, story_key, story_status,
+               story_assignee, compliant, reason, severity, score, checked_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (run_id, r.get("pair_type", "cr_story"), r["cr_key"], r["cr_status"], r.get("cr_assignee"),
+             r["story_key"], r["story_status"], r.get("story_assignee"), int(r["compliant"]),
+             r.get("reason"), r.get("severity"), r.get("score", 0), now),
         )
     conn.commit()
     conn.close()
@@ -134,11 +141,12 @@ def save_additional_checks(run_id, results, pair_type):
     conn = get_conn()
     for r in results:
         conn.execute(
-            """INSERT INTO checks (run_id, pair_type, cr_key, cr_status, story_key, story_status,
-               compliant, reason, severity, score, checked_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (run_id, pair_type, r["cr_key"], r["cr_status"], r["story_key"], r["story_status"],
-             int(r["compliant"]), r.get("reason"), r.get("severity"), r.get("score", 0), now),
+            """INSERT INTO checks (run_id, pair_type, cr_key, cr_status, cr_assignee, story_key, story_status,
+               story_assignee, compliant, reason, severity, score, checked_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (run_id, pair_type, r["cr_key"], r["cr_status"], r.get("cr_assignee"), r["story_key"],
+             r["story_status"], r.get("story_assignee"), int(r["compliant"]), r.get("reason"),
+             r.get("severity"), r.get("score", 0), now),
         )
     conn.commit()
     conn.close()

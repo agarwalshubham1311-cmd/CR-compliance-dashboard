@@ -32,6 +32,9 @@
   .chart-box p.title { font-size: 13px; color: #666; margin: 0 0 8px; }
 
   .filters { display: flex; gap: 8px; margin-bottom: 14px; flex-wrap: wrap; }
+  .scope-filters { display: flex; gap: 8px; margin-bottom: 12px; align-items: center; flex-wrap: wrap; }
+  .scope-label { font-size: 12px; color: #666; margin-right: 2px; }
+  .scope-pill { background: #e6f0fb; color: #185fa5; font-size: 12px; padding: 4px 10px; border-radius: 999px; }
 
   .table-wrap { background: #fafafa; border: 1px solid #e0e0e0; border-radius: 10px; overflow: hidden; }
   .table-header { display: flex; justify-content: space-between; align-items: center; padding: 12px 16px; border-bottom: 1px solid #e0e0e0; }
@@ -48,6 +51,7 @@
   .badge-High { background: #fdf0d9; color: #b5720a; }
   .badge-Medium { background: #e6f0fb; color: #185fa5; }
   .badge-Low { background: #eee; color: #555; }
+  .badge-OK { background: #e8f7ee; color: #1e7e45; }
   .chevron { color: #999; text-align: right; }
 
   .detail-row td { background: #f7f7f7; padding: 0; }
@@ -70,10 +74,18 @@
   <div><span class="version-tag">v6 · four-way live data</span></div>
   <div>
     <span id="status"></span>
-    <button onclick="refresh()">Refresh now</button>
+    <button id="refreshBtn" onclick="refresh()">Refresh now</button>
   </div>
 </div>
 <h2 style="margin:0 0 16px;">Compliance dashboard</h2>
+
+<div class="scope-filters">
+  <span class="scope-label">Project</span>
+  <select id="projectFilter" aria-label="Project"></select>
+  <span class="scope-label">Jira Board</span>
+  <select id="boardFilter" aria-label="Jira Board"></select>
+  <span class="scope-pill" id="scopePill">Scope: -</span>
+</div>
 
 <div class="tabs" id="tabs">
   <button class="tabbtn active" data-tab="epic">Epic <span class="count" id="count-epic">0</span></button>
@@ -93,6 +105,7 @@
   <select id="reasonFilter"><option value="all">All reasons</option></select>
   <select id="sevFilter">
     <option value="all">All severities</option>
+    <option value="OK">OK</option>
     <option value="Critical">Critical</option>
     <option value="High">High</option>
     <option value="Medium">Medium</option>
@@ -120,13 +133,18 @@
 </div>
 
 <script>
-const JIRA_BASE = "https://mastek-team-cuv3mazl.atlassian.net/browse/";
+let JIRA_BASE = "https://jira.bics-collaboration.homeoffice.gov.uk/browse/";
 let chart1, chart2;
 let sortAsc = false;
 let expandedKey = null;
 let currentDraftStoryKey = null;
 let currentTab = "epic";
 let tabData = { epic: [], cr: [], story: [], outcome: [] };
+let defaultProjectKey = 'ACC';
+let selectedProjectKey = 'ACC';
+let selectedBoardId = '';
+let selectedBoardLabel = 'All boards';
+let isLoadingBoards = false;
 
 // Per-tab config: how to fetch, what columns to show, how to label things.
 const TABS = {
@@ -157,11 +175,113 @@ async function fetchJSON(url, opts) {
   return r.json();
 }
 
+function issueBrowseUrl(issueKey) {
+  const key = encodeURIComponent(issueKey || '');
+  return JIRA_BASE ? `${JIRA_BASE}${key}` : '#';
+}
+
+async function loadConfig() {
+  try {
+    const cfg = await fetchJSON('/api/config');
+    JIRA_BASE = (cfg.jira_browse_base || '').trim();
+    defaultProjectKey = (cfg.default_project_key || 'ACC').trim().toUpperCase();
+    if (defaultProjectKey) selectedProjectKey = defaultProjectKey;
+  } catch (err) {
+    console.warn('Could not load dashboard config', err);
+    JIRA_BASE = '';
+  }
+}
+
+function updateScopePill() {
+  const projectText = selectedProjectKey || '-';
+  const boardText = isLoadingBoards
+    ? 'Loading boards...'
+    : (selectedBoardId ? (selectedBoardLabel || selectedBoardId) : 'All boards');
+  document.getElementById('scopePill').textContent = `Scope: ${projectText} / ${boardText}`;
+}
+
+function syncSelectedBoardLabel() {
+  const boardSelect = document.getElementById('boardFilter');
+  if (!boardSelect) return;
+  if (!selectedBoardId) {
+    selectedBoardLabel = 'All boards';
+    return;
+  }
+  selectedBoardLabel = boardSelect.selectedOptions?.[0]?.textContent || selectedBoardLabel || selectedBoardId;
+}
+
+function _scopeQuery() {
+  const q = new URLSearchParams();
+  if (selectedBoardId) {
+    q.set('board_id', selectedBoardId);
+  } else if (selectedProjectKey) {
+    q.set('project_key', selectedProjectKey);
+  }
+  const qs = q.toString();
+  return qs ? `?${qs}` : '';
+}
+
+async function loadProjects() {
+  const projectSelect = document.getElementById('projectFilter');
+  const result = await fetchJSON('/api/jira/projects');
+  const items = Array.isArray(result.items) ? result.items : [];
+
+  if (!items.length) {
+    projectSelect.innerHTML = '<option value="ACC">ACC</option>';
+    selectedProjectKey = 'ACC';
+    updateScopePill();
+    return;
+  }
+
+  const upperDefault = (result.default_project_key || defaultProjectKey || 'ACC').toUpperCase();
+  const hasDefault = items.some(p => (p.key || '').toUpperCase() === upperDefault);
+  selectedProjectKey = hasDefault ? upperDefault : ((items[0].key || 'ACC').toUpperCase());
+
+  projectSelect.innerHTML = items
+    .map(p => `<option value="${(p.key || '').toUpperCase()}">${p.key} - ${p.name || p.key}</option>`)
+    .join('');
+  projectSelect.value = selectedProjectKey;
+  updateScopePill();
+}
+
+async function loadBoards() {
+  const boardSelect = document.getElementById('boardFilter');
+  isLoadingBoards = true;
+  boardSelect.disabled = true;
+  boardSelect.innerHTML = '<option value="">Loading boards...</option>';
+  updateScopePill();
+
+  const query = selectedProjectKey ? `?project_key=${encodeURIComponent(selectedProjectKey)}` : '';
+  const result = await fetchJSON(`/api/jira/boards${query}`);
+  const boards = Array.isArray(result.items) ? result.items : [];
+
+  const options = ['<option value="">All boards</option>'];
+  boards.forEach(board => {
+    options.push(`<option value="${board.id}">${board.name} (${board.type || 'board'})</option>`);
+  });
+  boardSelect.innerHTML = options.join('');
+
+  if (selectedBoardId && boards.some(b => String(b.id) === String(selectedBoardId))) {
+    boardSelect.value = selectedBoardId;
+  } else {
+    selectedBoardId = '';
+    boardSelect.value = '';
+  }
+  syncSelectedBoardLabel();
+  isLoadingBoards = false;
+  boardSelect.disabled = false;
+  updateScopePill();
+}
+
 async function loadAll() {
-  const [summary, epicRows, outcomeRows, crFindings, outcomeFindings] = await Promise.all([
-    fetchJSON('/api/dashboard/summary'),
+  const scope = _scopeQuery();
+  const crQuery = new URLSearchParams(scope.startsWith('?') ? scope.slice(1) : scope);
+  crQuery.set('non_compliant_only', '1');
+  const [summary, epicRows, outcomeRows, crResponse, crFindings, outcomeFindings] = await Promise.all([
+    fetchJSON(`/api/dashboard/summary${scope}`),
     fetchJSON('/api/pairs/epic-cr'),
     fetchJSON('/api/pairs/story-outcome'),
+    fetchJSON(`/api/crs?${crQuery.toString()}`),
     fetchJSON('/api/fields/findings?entity_type=cr'),
     fetchJSON('/api/fields/findings?entity_type=outcome'),
   ]);
@@ -169,11 +289,12 @@ async function loadAll() {
   tabData.story = summary.active || [];
   tabData.epic = Array.isArray(epicRows) ? epicRows : [];
   tabData.outcome = Array.isArray(outcomeRows) ? outcomeRows : [];
-  tabData.cr = Array.isArray(crFindings) ? crFindings : [];
+  tabData.cr = Array.isArray(crResponse && crResponse.items) ? crResponse.items : [];
+  tabData._crFindings = Array.isArray(crFindings) ? crFindings : [];
   tabData._outcomeFindings = Array.isArray(outcomeFindings) ? outcomeFindings : [];
 
   document.getElementById('count-epic').textContent = tabData.epic.length;
-  document.getElementById('count-cr').textContent = new Set(tabData.cr.map(f => f.entity_key)).size;
+  document.getElementById('count-cr').textContent = tabData.cr.length;
   document.getElementById('count-story').textContent = tabData.story.length;
   document.getElementById('count-outcome').textContent = tabData.outcome.length;
 
@@ -181,7 +302,30 @@ async function loadAll() {
     ? 'Last scan: ' + new Date(summary.checked_at * 1000).toLocaleString()
     : 'No scan yet';
 
+  updateScopePill();
   renderTab();
+}
+
+async function refreshForSelection() {
+  const refreshBtn = document.getElementById('refreshBtn');
+  refreshBtn.disabled = true;
+  refreshBtn.textContent = 'Scanning...';
+  document.getElementById('status').textContent = 'Scanning selected project/board...';
+  const payload = {
+    project_key: selectedBoardId ? null : (selectedProjectKey || null),
+    board_id: selectedBoardId || null,
+  };
+  try {
+    await fetchJSON('/api/dashboard/refresh', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    await loadAll();
+  } finally {
+    refreshBtn.disabled = false;
+    refreshBtn.textContent = 'Refresh now';
+  }
 }
 
 function switchTab(tab) {
@@ -230,7 +374,7 @@ function populateFilters() {
   const sel = document.getElementById('reasonFilter');
   let values;
   if (cfg.fieldTab) {
-    values = [...new Set(tabData[currentTab].map(f => f.field).filter(Boolean))];
+    values = [...new Set(tabData._crFindings.map(f => f.field).filter(Boolean))];
   } else {
     values = [...new Set(tabData[currentTab].map(cfg.getRows).map(r => r.reason).filter(Boolean))];
   }
@@ -242,43 +386,45 @@ function populateFilters() {
 function renderCards() {
   const cfg = TABS[currentTab];
   const data = tabData[currentTab];
-  let checked, nonCompliant, critHigh, rate;
+  let checked, nonCompliant, critHigh, totalFindings;
 
   if (cfg.fieldTab) {
-    const entities = new Set(data.map(f => f.entity_key));
-    checked = entities.size;
-    nonCompliant = entities.size;
-    critHigh = data.filter(f => f.severity === 'High').length;
-    rate = '-';
+    checked = data.length;
+    nonCompliant = data.filter(cr => (cr.issue_count || 0) > 0).length;
+    critHigh = data.filter(cr => cr.max_severity === 'Critical' || cr.max_severity === 'High').length;
+    totalFindings = data.reduce((sum, cr) => sum + (cr.issue_count || 0), 0);
   } else {
     const rows = data.map(cfg.getRows);
     checked = rows.length;
     nonCompliant = rows.length;
     critHigh = rows.filter(r => r.severity === 'Critical' || r.severity === 'High').length;
-    rate = '-';
+    totalFindings = data.length;
   }
 
   document.getElementById('cards').innerHTML = `
-    <div class="card"><p class="label">${cfg.fieldTab ? 'Entities with issues' : 'Checked'}</p><p class="value">${checked}</p></div>
-    <div class="card danger"><p class="label">Non-compliant</p><p class="value">${nonCompliant}</p></div>
+    <div class="card"><p class="label">${cfg.fieldTab ? 'CRs scanned' : 'Checked'}</p><p class="value">${checked}</p></div>
+    <div class="card danger"><p class="label">${cfg.fieldTab ? 'CRs with issues' : 'Non-compliant'}</p><p class="value">${nonCompliant}</p></div>
     <div class="card"><p class="label">Critical/High</p><p class="value">${critHigh}</p></div>
-    <div class="card"><p class="label">Total findings</p><p class="value">${data.length}</p></div>
+    <div class="card"><p class="label">Total findings</p><p class="value">${totalFindings}</p></div>
   `;
 }
 
 function renderCharts() {
   const cfg = TABS[currentTab];
   const data = tabData[currentTab];
-  let breakdownLabels, breakdownData, sevData;
+  let breakdownLabels, breakdownData, sevData, sevLabels, sevColors;
 
   if (cfg.fieldTab) {
+    const findings = tabData._crFindings;
     const byField = {};
-    data.forEach(f => { byField[f.field] = (byField[f.field] || 0) + 1; });
+    findings.forEach(f => { byField[f.field] = (byField[f.field] || 0) + 1; });
     breakdownLabels = Object.keys(byField);
     breakdownData = Object.values(byField);
-    const sevCounts = { Critical: 0, High: 0, Medium: 0, Low: 0 };
-    data.forEach(f => { if (sevCounts[f.severity] !== undefined) sevCounts[f.severity]++; });
-    sevData = Object.values(sevCounts);
+    const sevCounts = { Critical: 0, High: 0, Medium: 0, Low: 0, OK: 0 };
+    data.forEach(cr => { if (sevCounts[cr.max_severity] !== undefined) sevCounts[cr.max_severity]++; });
+    sevLabels = Object.keys(sevCounts);
+    sevData = sevLabels.map(label => sevCounts[label]);
+    sevColors = sevLabels.map(label => ({ Critical: '#e34948', High: '#eda100', Medium: '#2a78d6', Low: '#898781', OK: '#2e9d57' }[label]));
     document.getElementById('chart1title').textContent = 'Findings by field';
   } else {
     const rows = data.map(cfg.getRows);
@@ -288,7 +434,9 @@ function renderCharts() {
     breakdownData = Object.values(byReason);
     const sevCounts = { Critical: 0, High: 0, Medium: 0, Low: 0 };
     rows.forEach(r => { if (sevCounts[r.severity] !== undefined) sevCounts[r.severity]++; });
-    sevData = Object.values(sevCounts);
+    sevLabels = Object.keys(sevCounts);
+    sevData = sevLabels.map(label => sevCounts[label]);
+    sevColors = ['#e34948','#eda100','#2a78d6','#898781'];
     document.getElementById('chart1title').textContent = 'Reason breakdown';
   }
 
@@ -302,7 +450,7 @@ function renderCharts() {
   });
   chart2 = new Chart(document.getElementById('chart2'), {
     type: 'doughnut',
-    data: { labels: ['Critical','High','Medium','Low'], datasets: [{ data: sevData, backgroundColor: ['#e34948','#eda100','#2a78d6','#898781'] }] },
+    data: { labels: sevLabels, datasets: [{ data: sevData, backgroundColor: sevColors }] },
     options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { position: 'right', labels: { boxWidth: 10, font: { size: 11 } } } } }
   });
 }
@@ -316,34 +464,29 @@ function renderRows() {
 
   if (cfg.fieldTab) {
     let filtered = tabData[currentTab]
-      .filter(f => (reasonVal === 'all' || f.field === reasonVal) && (sevVal === 'all' || f.severity === sevVal));
+      .filter(cr => {
+        const findings = cr.field_findings || [];
+        const reasonMatch = reasonVal === 'all' || findings.some(f => f.field === reasonVal);
+        const severityMatch = sevVal === 'all' || cr.max_severity === sevVal;
+        return reasonMatch && severityMatch;
+      })
+      .sort((a, b) => sortAsc
+        ? _severitySortValue(a.max_severity) - _severitySortValue(b.max_severity)
+        : _severitySortValue(b.max_severity) - _severitySortValue(a.max_severity) || a.key.localeCompare(b.key));
 
     if (filtered.length === 0) {
-      rows.innerHTML = `<tr><td colspan="5" class="empty">No findings match these filters.</td></tr>`;
+      rows.innerHTML = `<tr><td colspan="5" class="empty">No CRs match these filters.</td></tr>`;
       return;
     }
 
-    // Group findings by entity (CR/Outcome key) instead of one row per field
-    const rank = { Critical: 3, High: 2, Medium: 1, Low: 0 };
-    const groups = {};
-    filtered.forEach(f => {
-      if (!groups[f.entity_key]) {
-        groups[f.entity_key] = { key: f.entity_key, status: f.entity_status, findings: [], maxRank: 0 };
-      }
-      groups[f.entity_key].findings.push(f);
-      groups[f.entity_key].maxRank = Math.max(groups[f.entity_key].maxRank, rank[f.severity] || 0);
-    });
-    const groupList = Object.values(groups).sort((a, b) => sortAsc ? a.maxRank - b.maxRank : b.maxRank - a.maxRank);
-    const sevLabel = { 3: 'Critical', 2: 'High', 1: 'Medium', 0: 'Low' };
-
-    groupList.forEach(g => {
+    filtered.forEach(g => {
       const tr = document.createElement('tr');
       tr.className = 'data-row';
       tr.innerHTML = `
-        <td style="padding:8px 12px;"><a class="key-link" href="${JIRA_BASE}${g.key}" target="_blank" onclick="event.stopPropagation()">${g.key}</a></td>
+        <td style="padding:8px 12px;"><a class="key-link" href="${issueBrowseUrl(g.key)}" target="_blank" onclick="event.stopPropagation()">${g.key}</a></td>
         <td style="padding:8px 12px;">${g.status || '-'}</td>
-        <td style="padding:8px 12px;"><span class="badge badge-${sevLabel[g.maxRank]}">${sevLabel[g.maxRank]}</span></td>
-        <td style="padding:8px 12px;color:#666;" colspan="2">${g.findings.length} issue${g.findings.length > 1 ? 's' : ''}</td>
+        <td style="padding:8px 12px;"><span class="badge badge-${g.max_severity}">${g.max_severity}</span></td>
+        <td style="padding:8px 12px;color:#666;">${g.issue_count} issue${g.issue_count !== 1 ? 's' : ''}</td>
         <td style="padding:8px 12px;color:#999;text-align:right;">${expandedKey === g.key ? '▾' : '▸'}</td>
       `;
       tr.addEventListener('click', () => { expandedKey = expandedKey === g.key ? null : g.key; renderRows(); });
@@ -352,13 +495,13 @@ function renderRows() {
       if (expandedKey === g.key) {
         const detail = document.createElement('tr');
         detail.className = 'detail-row';
-        const issueRows = g.findings.map(f => `
+        const issueRows = (g.field_findings || []).map(f => `
           <div style="display:flex;align-items:center;gap:12px;padding:8px 0;border-top:1px solid #e6e6e6;font-size:13px;">
             <span style="width:240px;flex-shrink:0;font-weight:500;">${f.field || '-'}</span>
             <span style="color:${f.check_name === 'overdue' || f.check_name === 'go_live_overdue' ? '#c0392b' : '#888'};flex:1;">${f.message}</span>
           </div>
-        `).join('');
-        detail.innerHTML = `<td colspan="6"><div style="padding:4px 20px 16px 44px;">${issueRows}</div></td>`;
+        `).join('') || `<div style="padding:8px 0;font-size:13px;color:#666;">No field issues found for this CR in the latest scan.</div>`;
+        detail.innerHTML = `<td colspan="5"><div style="padding:4px 20px 16px 44px;">${issueRows}</div></td>`;
         rows.appendChild(detail);
       }
     });
@@ -386,9 +529,9 @@ function renderRows() {
       </td>`;
     }
     tr.innerHTML = `
-      <td style="padding:8px 12px;"><a class="key-link" href="${JIRA_BASE}${d.left_key}" target="_blank" onclick="event.stopPropagation()">${d.left_key}</a></td>
+      <td style="padding:8px 12px;"><a class="key-link" href="${issueBrowseUrl(d.left_key)}" target="_blank" onclick="event.stopPropagation()">${d.left_key}</a></td>
       <td style="padding:8px 12px;">${d.left_status}</td>
-      <td style="padding:8px 12px;"><a class="key-link" href="${JIRA_BASE}${d.right_key}" target="_blank" onclick="event.stopPropagation()">${d.right_key}</a></td>
+      <td style="padding:8px 12px;"><a class="key-link" href="${issueBrowseUrl(d.right_key)}" target="_blank" onclick="event.stopPropagation()">${d.right_key}</a></td>
       <td style="padding:8px 12px;">${d.right_status}</td>
       <td style="padding:8px 12px;"><span class="badge badge-reason">${d.reason}</span></td>
       <td style="padding:8px 12px;"><span class="badge badge-${d.severity}">${d.severity}</span></td>
@@ -410,7 +553,7 @@ function renderRows() {
         <div class="detail-actions">
           ${cfg.hasActions ? `<button onclick="event.stopPropagation();draftComment('${d.left_key}','${d.right_key}')">Draft comment</button>
           <button onclick="event.stopPropagation();resolveRow('${d.left_key}','${d.right_key}')">Mark resolved</button>` : ''}
-          <a href="${JIRA_BASE}${d.left_key}" target="_blank">Open in Jira ↗</a>
+          <a href="${issueBrowseUrl(d.left_key)}" target="_blank">Open in Jira ↗</a>
         </div>
       </div></td>`;
       rows.appendChild(detail);
@@ -467,12 +610,39 @@ function closeDraft() {
 }
 
 async function refresh() {
-  document.getElementById('status').textContent = 'Scanning...';
-  await fetchJSON('/api/dashboard/refresh', { method: 'POST' });
-  loadAll();
+  await refreshForSelection();
 }
 
-loadAll();
+function _severitySortValue(severity) {
+  return { Critical: 3, High: 2, Medium: 1, Low: 0, OK: -1 }[severity] ?? -1;
+}
+
+async function initDashboard() {
+  await loadConfig();
+  await loadProjects();
+  await loadBoards();
+  await loadAll();
+}
+
+document.getElementById('projectFilter').addEventListener('change', async (event) => {
+  selectedProjectKey = (event.target.value || 'ACC').toUpperCase();
+  selectedBoardId = '';
+  selectedBoardLabel = 'All boards';
+  document.getElementById('status').textContent = 'Scope changed. Click Refresh now to rescan.';
+  updateScopePill();
+  await loadBoards();
+  await loadAll();
+});
+
+document.getElementById('boardFilter').addEventListener('change', async (event) => {
+  selectedBoardId = event.target.value || '';
+  syncSelectedBoardLabel();
+  document.getElementById('status').textContent = 'Scope changed. Click Refresh now to rescan.';
+  updateScopePill();
+  await loadAll();
+});
+
+initDashboard();
 setInterval(loadAll, 60000);
 </script>
 </body>

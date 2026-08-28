@@ -221,9 +221,9 @@ function renderTable() {
     const tr = document.createElement('tr');
     tr.className = 'data-row';
     tr.innerHTML = `
-      <td><a class="key-link" href="https://mastek-team-cuv3mazl.atlassian.net/browse/${d.story_key}" target="_blank" onclick="event.stopPropagation()">${d.story_key}</a></td>
+      <td><a class="key-link" href="https://jira.bics-collaboration.homeoffice.gov.uk/browse/${d.story_key}" target="_blank" onclick="event.stopPropagation()">${d.story_key}</a></td>
       <td>${d.story_status}</td>
-      <td><a class="key-link" href="https://mastek-team-cuv3mazl.atlassian.net/browse/${d.cr_key}" target="_blank" onclick="event.stopPropagation()">${d.cr_key}</a></td>
+      <td><a class="key-link" href="https://jira.bics-collaboration.homeoffice.gov.uk/browse/${d.cr_key}" target="_blank" onclick="event.stopPropagation()">${d.cr_key}</a></td>
       <td>${d.cr_status}</td>
       <td><span class="badge badge-reason">${d.reason}</span></td>
       <td><span class="badge badge-${d.severity}">${d.severity}</span></td>
@@ -248,7 +248,7 @@ function renderTable() {
         <div class="detail-actions">
           <button onclick="event.stopPropagation();draftComment('${d.story_key}','${d.cr_key}')">Draft comment</button>
           <button onclick="event.stopPropagation();resolveRow('${d.story_key}','${d.cr_key}')">Mark resolved</button>
-          <a href="https://mastek-team-cuv3mazl.atlassian.net/browse/${d.story_key}" target="_blank">Open in Jira ↗</a>
+          <a href="https://jira.bics-collaboration.homeoffice.gov.uk/browse/${d.story_key}" target="_blank">Open in Jira ↗</a>
         </div>
       </div></td>`;
       rows.appendChild(detail);
