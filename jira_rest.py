@@ -30,6 +30,10 @@ else:
 JIRA_URL = os.environ.get("JIRA_URL")
 JIRA_USERNAME = os.environ.get("JIRA_USERNAME")
 JIRA_API_TOKEN = os.environ.get("JIRA_API_TOKEN")
+JIRA_PASSWORD = os.environ.get("JIRA_PASSWORD")
+JIRA_API_VERSION = os.environ.get("JIRA_API_VERSION")
+JIRA_SECRET = JIRA_API_TOKEN or JIRA_PASSWORD
+
 
 
 def get_issue_raw(issue_key):
@@ -38,23 +42,23 @@ def get_issue_raw(issue_key):
     (Complexity, RAG Status, etc.) are available for compliance checks.
     Raises on missing credentials or a failed request."""
     _require_creds()
-    url = f"{JIRA_URL.rstrip('/')}/rest/api/3/issue/{issue_key}"
-    resp = requests.get(url, auth=HTTPBasicAuth(JIRA_USERNAME, JIRA_API_TOKEN), timeout=30)
+    url = f"{JIRA_URL.rstrip('/')}/rest/api/{JIRA_API_VERSION}/issue/{issue_key}"
+    resp = requests.get(url, auth=_auth(), timeout=30)
     resp.raise_for_status()
     return resp.json()
 
 
 def _require_creds():
-    if not all([JIRA_URL, JIRA_USERNAME, JIRA_API_TOKEN]):
+    if not all([JIRA_URL, JIRA_USERNAME, JIRA_SECRET]):
         raise RuntimeError(
-            "JIRA_URL / JIRA_USERNAME / JIRA_API_TOKEN must be set in the Flask "
+            "JIRA_URL / JIRA_USERNAME / (JIRA_API_TOKEN or JIRA_PASSWORD) must be set in the Flask "
             "app's own environment (not just jira.env for the Docker container) "
             "for direct field access to work."
         )
 
 
 def _auth():
-    return HTTPBasicAuth(JIRA_USERNAME, JIRA_API_TOKEN)
+    return HTTPBasicAuth(JIRA_USERNAME, JIRA_SECRET)
 
 
 def get_available_transitions(issue_key):
@@ -62,7 +66,7 @@ def get_available_transitions(issue_key):
     now, per Jira's own workflow — never a hardcoded guess. Each entry:
     {"id": "...", "name": "...", "to_status": "..."}"""
     _require_creds()
-    url = f"{JIRA_URL.rstrip('/')}/rest/api/3/issue/{issue_key}/transitions"
+    url = f"{JIRA_URL.rstrip('/')}/rest/api/{JIRA_API_VERSION}/issue/{issue_key}/transitions"
     resp = requests.get(url, auth=_auth(), timeout=30)
     resp.raise_for_status()
     transitions = resp.json().get("transitions", [])
@@ -78,7 +82,7 @@ def transition_issue(issue_key, transition_id):
     ID, and validating against the real available list prevents silently
     failed or wrong-workflow writes."""
     _require_creds()
-    url = f"{JIRA_URL.rstrip('/')}/rest/api/3/issue/{issue_key}/transitions"
+    url = f"{JIRA_URL.rstrip('/')}/rest/api/{JIRA_API_VERSION}/issue/{issue_key}/transitions"
     resp = requests.post(url, json={"transition": {"id": transition_id}}, auth=_auth(), timeout=30)
     resp.raise_for_status()
     return {"success": True}
@@ -90,7 +94,7 @@ def update_issue_fields(issue_key, fields_payload):
     select-type field needs {"value": "High"}, plain text/dates are the
     raw value, labels are a list."""
     _require_creds()
-    url = f"{JIRA_URL.rstrip('/')}/rest/api/3/issue/{issue_key}"
+    url = f"{JIRA_URL.rstrip('/')}/rest/api/{JIRA_API_VERSION}/issue/{issue_key}"
     resp = requests.put(url, json={"fields": fields_payload}, auth=_auth(), timeout=30)
     resp.raise_for_status()
     return {"success": True}
@@ -100,7 +104,7 @@ def get_projects():
     """Every Jira project these credentials can see. Uses the paginated
     project/search endpoint (the older /project endpoint is deprecated)."""
     _require_creds()
-    url = f"{JIRA_URL.rstrip('/')}/rest/api/3/project/search"
+    url = f"{JIRA_URL.rstrip('/')}/rest/api/{JIRA_API_VERSION}/project/search"
     projects, start_at = [], 0
     while True:
         resp = requests.get(url, params={"startAt": start_at, "maxResults": 50}, auth=_auth(), timeout=30)
@@ -117,7 +121,7 @@ def get_projects():
 def get_boards(project_key=None):
     """Boards (Scrum/Kanban) visible to these credentials, optionally
     scoped to one project. Boards live under Jira's separate Agile REST
-    API (/rest/agile/1.0/), not the standard /rest/api/3/ used
+    API (/rest/agile/1.0/), not the standard /rest/api/{JIRA_API_VERSION}/ used
     everywhere else in this file — a board isn't a JQL-queryable concept,
     it's tied to a filter configured on the board itself."""
     _require_creds()
