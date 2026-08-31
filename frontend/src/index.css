@@ -32,6 +32,10 @@ button { padding: 7px 14px; font-size: 13px; cursor: pointer; border: 0.5px soli
 button:hover { background: var(--surface-1); }
 select, input[type="date"], input[type="text"] { font-size: 13px; padding: 6px 10px; border-radius: var(--radius); border: 0.5px solid var(--border); background: var(--surface-2); }
 
+.scope-filters { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 14px; }
+.scope-label { font-size: 12px; color: var(--text-muted); margin-right: 2px; }
+.scope-pill { background: var(--bg-accent); color: var(--text-accent); font-size: 12px; padding: 4px 10px; border-radius: 999px; }
+
 .tabs { display: inline-flex; gap: 4px; background: var(--surface-1); border-radius: 8px; padding: 4px; margin-bottom: 20px; }
 .tabbtn { border: none; background: none; padding: 8px 16px; font-size: 13px; color: var(--text-secondary); border-radius: 6px; }
 .tabbtn:hover { background: none; color: var(--text-accent); }
@@ -83,12 +87,24 @@ a.key-link { color: var(--text-accent); text-decoration: none; }
 .detail-actions a { font-size: 13px; color: var(--text-accent); text-decoration: none; display: inline-flex; align-items: center; gap: 4px; margin-left: auto; }
 .detail-actions i { font-size: 14px; margin-right: 5px; }
 
-#draftBox { background: var(--bg-warning); border: 0.5px solid #f0e0a0; border-radius: var(--radius); padding: 14px; margin: 12px 0 20px; }
-#draftBox textarea { width: 100%; min-height: 80px; font-family: inherit; font-size: 13px; padding: 8px; box-sizing: border-box; border-radius: var(--radius); border: 0.5px solid var(--border); }
-#draftBox .actions { margin-top: 8px; display: flex; gap: 8px; }
-#draftStatus { font-size: 12px; color: var(--text-muted); margin: 6px 0 0; }
+.modal-overlay {
+  position: fixed; inset: 0; background: rgba(0,0,0,0.45);
+  display: flex; align-items: center; justify-content: center;
+  z-index: 1000; padding: 20px; box-sizing: border-box;
+}
+.modal-card {
+  background: var(--surface-2); border-radius: 12px; padding: 20px;
+  width: 100%; max-width: 520px; box-shadow: var(--shadow-lg);
+}
+.modal-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.modal-close { border: none; background: none; font-size: 14px; padding: 2px 6px; color: var(--text-secondary); }
+.modal-close:hover { background: var(--surface-1); }
+.modal-card textarea { width: 100%; min-height: 120px; font-family: inherit; font-size: 13px; padding: 8px; box-sizing: border-box; border-radius: var(--radius); border: 0.5px solid var(--border); }
+.modal-card .actions { margin-top: 10px; display: flex; gap: 8px; }
+#draftStatus { font-size: 12px; color: var(--text-muted); margin: 8px 0 0; }
 
-#statusBox { background: var(--bg-accent); border: 0.5px solid var(--blue); border-radius: var(--radius); padding: 14px; margin: 12px 0 20px; }
+.status-inline-row td { background: var(--bg-accent); padding: 0; }
+.status-inline { display: flex; align-items: center; gap: 10px; padding: 12px 20px; flex-wrap: wrap; }
 
 .empty { text-align: center; color: var(--text-muted); padding: 28px 12px; }
 

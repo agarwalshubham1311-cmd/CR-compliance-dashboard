@@ -65,6 +65,11 @@ export default function App() {
   const [sortAsc, setSortAsc] = useState(false)
   const [draft, setDraft] = useState(null) // { forKey, text, statusMsg }
   const [statusChange, setStatusChange] = useState(null) // { forKey, transitions, selected, msg }
+  const [projects, setProjects] = useState([])
+  const [boards, setBoards] = useState([])
+  const [selectedProjectKey, setSelectedProjectKey] = useState('')
+  const [selectedBoardId, setSelectedBoardId] = useState('')
+  const [isLoadingBoards, setIsLoadingBoards] = useState(false)
   const fieldCache = useRef({})
 
   const loadAll = useCallback(async () => {
@@ -88,8 +93,50 @@ export default function App() {
   }, [])
 
   useEffect(() => {
-    fetchJSON('/api/config').then(c => { if (c.jira_base) setJiraBase(c.jira_base) })
+    fetchJSON('/api/config').then(c => {
+      if (c.jira_base) setJiraBase(c.jira_base)
+      loadProjects(c.default_project_key)
+    })
   }, [])
+
+  async function loadProjects(defaultKey) {
+    const result = await fetchJSON('/api/jira/projects')
+    if (result.error) { setProjects([]); return }
+    const items = result.items || []
+    setProjects(items)
+    const upperDefault = (defaultKey || result.default_project_key || '').toUpperCase()
+    const match = items.find(p => (p.key || '').toUpperCase() === upperDefault)
+    const initial = match ? match.key : (items[0] ? items[0].key : '')
+    setSelectedProjectKey(initial)
+    if (initial) loadBoards(initial)
+  }
+
+  async function loadBoards(projectKey) {
+    setIsLoadingBoards(true)
+    setSelectedBoardId('')
+    const result = await fetchJSON(`/api/jira/boards?project_key=${encodeURIComponent(projectKey)}`)
+    setBoards(result.error ? [] : (result.items || []))
+    setIsLoadingBoards(false)
+  }
+
+  function onProjectChange(key) {
+    setSelectedProjectKey(key)
+    setSelectedBoardId('')
+    setStatus('Scope changed. Click Refresh now to rescan.')
+    loadBoards(key)
+  }
+
+  function onBoardChange(id) {
+    setSelectedBoardId(id)
+    setStatus('Scope changed. Click Refresh now to rescan.')
+  }
+
+  useEffect(() => {
+    if (!draft) return
+    const onKey = e => { if (e.key === 'Escape') setDraft(null) }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [draft])
 
   useEffect(() => {
     loadAll()
@@ -98,8 +145,14 @@ export default function App() {
   }, [loadAll])
 
   async function refresh() {
-    setStatus('Scanning...')
-    await fetchJSON('/api/dashboard/refresh', { method: 'POST' })
+    setStatus(selectedBoardId ? 'Scanning selected board...' : selectedProjectKey ? 'Scanning selected project...' : 'Scanning...')
+    await fetchJSON('/api/dashboard/refresh', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        project_key: selectedBoardId ? null : (selectedProjectKey || null),
+        board_id: selectedBoardId || null,
+      }),
+    })
     loadAll()
   }
 
@@ -155,6 +208,10 @@ export default function App() {
     setStatusChange({ forKey: issueKey, transitions: result.transitions, selected: result.transitions[0].id, msg: '' })
   }
 
+  function selectTransition(transitionId) {
+    setStatusChange(s => ({ ...s, selected: transitionId }))
+  }
+
   async function applyStatusChange() {
     if (!statusChange || !statusChange.selected) return
     setStatusChange(s => ({ ...s, msg: 'Applying...' }))
@@ -193,6 +250,22 @@ export default function App() {
         </div>
       </div>
 
+      <div className="scope-filters">
+        <span className="scope-label">Project</span>
+        <select value={selectedProjectKey} onChange={e => onProjectChange(e.target.value)}>
+          {projects.length === 0 && <option value="">Loading...</option>}
+          {projects.map(p => <option key={p.key} value={p.key}>{p.key} — {p.name}</option>)}
+        </select>
+        <span className="scope-label">Jira board</span>
+        <select value={selectedBoardId} onChange={e => onBoardChange(e.target.value)} disabled={isLoadingBoards}>
+          <option value="">All boards</option>
+          {boards.map(b => <option key={b.id} value={b.id}>{b.name} ({b.type})</option>)}
+        </select>
+        <span className="scope-pill">
+          Scope: {selectedProjectKey || '—'} / {isLoadingBoards ? 'Loading boards...' : (selectedBoardId ? (boards.find(b => String(b.id) === String(selectedBoardId))?.name || selectedBoardId) : 'All boards')}
+        </span>
+      </div>
+
       <div className="tabs">
         {Object.entries(TABS).map(([key, t]) => {
           const count = key === 'epic' ? epicFieldsCount : key === 'cr' ? crCount : data[key].length
@@ -220,6 +293,7 @@ export default function App() {
           cfg={cfg} rows={data.epic} reasonFilter={reasonFilter} sevFilter={sevFilter}
           sortAsc={sortAsc} setSortAsc={setSortAsc} expandedKey={expandedKey} setExpandedKey={setExpandedKey}
           onResolve={resolveRow} onDraft={draftPhaseComment} onStatusChange={openStatusBox}
+          statusChange={statusChange} onApplyStatus={applyStatusChange} onSelectTransition={selectTransition} onCloseStatus={() => setStatusChange(null)}
           title="Phase mismatches" jiraBase={jiraBase}
         />
       )}
@@ -228,6 +302,7 @@ export default function App() {
           cfg={cfg} rows={data[currentTab]} reasonFilter={reasonFilter} sevFilter={sevFilter}
           sortAsc={sortAsc} setSortAsc={setSortAsc} expandedKey={expandedKey} setExpandedKey={setExpandedKey}
           onResolve={resolveRow} onDraft={draftPhaseComment} onStatusChange={openStatusBox}
+          statusChange={statusChange} onApplyStatus={applyStatusChange} onSelectTransition={selectTransition} onCloseStatus={() => setStatusChange(null)}
           title={'Non-compliant ' + currentTab + 's'} jiraBase={jiraBase}
         />
       )}
@@ -249,36 +324,22 @@ export default function App() {
       )}
 
       {draft && (
-        <div id="draftBox">
-          <p style={{ fontSize: 12, color: '#886', margin: '0 0 6px' }}>
-            AI-drafted comment for <b>{draft.forKey}</b> \u2014 review before posting
-          </p>
-          <textarea value={draft.text} onChange={e => setDraft(d => ({ ...d, text: e.target.value }))} />
-          <div className="actions">
-            <button onClick={postDraft}>Post to Jira</button>
-            <button onClick={() => setDraft(null)}>Discard</button>
+        <div className="modal-overlay" onClick={() => setDraft(null)}>
+          <div className="modal-card" onClick={e => e.stopPropagation()}>
+            <div className="modal-header">
+              <p style={{ fontSize: 14, fontWeight: 500, margin: 0 }}>
+                AI-drafted comment for <span style={{ color: '#185fa5' }}>{draft.forKey}</span>
+              </p>
+              <button className="modal-close" onClick={() => setDraft(null)} aria-label="Close">✕</button>
+            </div>
+            <p style={{ fontSize: 12, color: '#888', margin: '4px 0 10px' }}>Review before posting</p>
+            <textarea value={draft.text} onChange={e => setDraft(d => ({ ...d, text: e.target.value }))} />
+            <div className="actions">
+              <button onClick={postDraft}>Post to Jira</button>
+              <button onClick={() => setDraft(null)}>Discard</button>
+            </div>
+            <p id="draftStatus">{draft.statusMsg}</p>
           </div>
-          <p id="draftStatus">{draft.statusMsg}</p>
-        </div>
-      )}
-
-      {statusChange && (
-        <div id="statusBox">
-          <p style={{ fontSize: 12, color: '#185fa5', margin: '0 0 6px' }}>
-            Change status for <b>{statusChange.forKey}</b>
-          </p>
-          {statusChange.transitions.length > 0 && (
-            <select value={statusChange.selected} onChange={e => setStatusChange(s => ({ ...s, selected: e.target.value }))}>
-              {statusChange.transitions.map(t => (
-                <option key={t.id} value={t.id}>{t.to_status} ({t.name})</option>
-              ))}
-            </select>
-          )}
-          <div style={{ marginTop: 8, display: 'flex', gap: 8 }}>
-            <button onClick={applyStatusChange}>Apply</button>
-            <button onClick={() => setStatusChange(null)}>Cancel</button>
-          </div>
-          <p style={{ fontSize: 12, color: '#888', margin: '6px 0 0' }}>{statusChange.msg}</p>
         </div>
       )}
     </div>
@@ -369,7 +430,7 @@ function Charts({ tab, data }) {
   )
 }
 
-function PhaseTable({ cfg, rows, reasonFilter, sevFilter, sortAsc, setSortAsc, expandedKey, setExpandedKey, onResolve, onDraft, onStatusChange, title, jiraBase }) {
+function PhaseTable({ cfg, rows, reasonFilter, sevFilter, sortAsc, setSortAsc, expandedKey, setExpandedKey, onResolve, onDraft, onStatusChange, statusChange, onApplyStatus, onSelectTransition, onCloseStatus, title, jiraBase }) {
   let filtered = rows.map(cfg.getRows)
     .filter(r => (reasonFilter === 'all' || r.reason === reasonFilter) && (sevFilter === 'all' || r.severity === sevFilter))
     .sort((a, b) => sortAsc ? (a.score || 0) - (b.score || 0) : (b.score || 0) - (a.score || 0))
@@ -384,7 +445,7 @@ function PhaseTable({ cfg, rows, reasonFilter, sevFilter, sortAsc, setSortAsc, e
         <thead>
           <tr>
             {cfg.columns.map(c => c === 'Severity'
-              ? <th key={c} style={{ cursor: 'pointer' }} onClick={() => setSortAsc(!sortAsc)}>Severity \u21c5</th>
+              ? <th key={c} style={{ cursor: 'pointer' }} onClick={() => setSortAsc(!sortAsc)}>Severity ⇅</th>
               : <th key={c}>{c}</th>)}
             {cfg.hasActions && <th>Actions</th>}
             <th></th>
@@ -418,6 +479,29 @@ function PhaseTable({ cfg, rows, reasonFilter, sevFilter, sortAsc, setSortAsc, e
                   )}
                   <td className="chevron">{isOpen ? '\u25be' : '\u25b8'}</td>
                 </tr>
+                {statusChange && statusChange.forKey === targetKey && (
+                  <tr className="status-inline-row">
+                    <td colSpan={cfg.hasActions ? 7 : 6}>
+                      <div className="status-inline">
+                        <span style={{ fontSize: 13, fontWeight: 500, color: '#185fa5' }}>Change status for {targetKey}</span>
+                        {statusChange.transitions.length > 0 ? (
+                          <select value={statusChange.selected} onChange={e => onSelectTransition(e.target.value)}>
+                            {statusChange.transitions.map(t => (
+                              <option key={t.id} value={t.id}>{t.to_status} ({t.name})</option>
+                            ))}
+                          </select>
+                        ) : (
+                          <span style={{ fontSize: 12, color: '#888' }}>{statusChange.msg || 'Loading transitions...'}</span>
+                        )}
+                        {statusChange.transitions.length > 0 && <button onClick={onApplyStatus}>Apply</button>}
+                        <button onClick={onCloseStatus}>Cancel</button>
+                        {statusChange.msg && statusChange.transitions.length > 0 && (
+                          <span style={{ fontSize: 12, color: '#888' }}>{statusChange.msg}</span>
+                        )}
+                      </div>
+                    </td>
+                  </tr>
+                )}
                 {isOpen && (
                   <tr className="detail-row">
                     <td colSpan={cfg.hasActions ? 7 : 6}>
@@ -479,7 +563,7 @@ function FieldTable({ findings, reasonFilter, sevFilter, entityType, expandedKey
                   <td onClick={e => e.stopPropagation()}><button onClick={() => onDraft(g.key, g.status, g.findings)}>Draft</button></td>
                   <td className="chevron">{isOpen ? '\u25be' : '\u25b8'}</td>
                 </tr>
-                {isOpen && <EditableFieldsRow entityKey={g.key} entityType={entityType} fieldCache={fieldCache} onSaved={onSaved} />}
+                {isOpen && <EditableFieldsRow entityKey={g.key} entityType={entityType} fieldCache={fieldCache} onSaved={onSaved} findings={g.findings} />}
               </React.Fragment>
             )
           })}
@@ -489,7 +573,7 @@ function FieldTable({ findings, reasonFilter, sevFilter, entityType, expandedKey
   )
 }
 
-function EditableFieldsRow({ entityKey, entityType, fieldCache, onSaved }) {
+function EditableFieldsRow({ entityKey, entityType, fieldCache, onSaved, findings }) {
   const [fields, setFields] = useState(null)
   const [error, setError] = useState(null)
   const [msgs, setMsgs] = useState({})
@@ -518,6 +602,22 @@ function EditableFieldsRow({ entityKey, entityType, fieldCache, onSaved }) {
     }
   }
 
+  const emptyCount = fields ? fields.filter(f => f.value === null || f.value === undefined || f.value === '').length : 0
+  const flaggedCount = findings ? findings.length : 0
+
+  // Match each finding to its field by label — field_rules.py's findings
+  // use the same human-readable label ("Target Delivery Date") as the
+  // /api/entities/.../fields endpoint's field.label, so this join is a
+  // straightforward label match. A field can have more than one finding
+  // (e.g. a CR's date both overdue AND missing a delay reason).
+  const findingsByLabel = {}
+  if (findings) {
+    findings.forEach(f => {
+      findingsByLabel[f.field] = findingsByLabel[f.field] || []
+      findingsByLabel[f.field].push(f)
+    })
+  }
+
   return (
     <tr className="detail-row">
       <td colSpan={6}>
@@ -527,9 +627,12 @@ function EditableFieldsRow({ entityKey, entityType, fieldCache, onSaved }) {
           {fields && (
             <>
               <p style={{ fontSize: 12, color: '#888', margin: '0 0 8px' }}>
-                Showing all {fields.length} fields \u2014 {fields.filter(f => f.value === null || f.value === undefined || f.value === '').length} not set (edit any field below, not just the flagged ones)
+                Showing all {fields.length} fields — {emptyCount} empty, {flaggedCount} flagged issue{flaggedCount === 1 ? '' : 's'} below.
               </p>
-              {fields.map(f => <FieldEditor key={f.key} field={f} msg={msgs[f.key]} onSave={v => save(f.key, v)} />)}
+              {fields.map(f => (
+                <FieldEditor key={f.key} field={f} msg={msgs[f.key]} onSave={v => save(f.key, v)}
+                             issues={findingsByLabel[f.label]} />
+              ))}
             </>
           )}
         </div>
@@ -538,7 +641,7 @@ function EditableFieldsRow({ entityKey, entityType, fieldCache, onSaved }) {
   )
 }
 
-function FieldEditor({ field, msg, onSave }) {
+function FieldEditor({ field, msg, onSave, issues }) {
   const isSet = field.value !== null && field.value !== undefined && field.value !== ''
   const [val, setVal] = useState(
     field.type === 'labels' ? (Array.isArray(field.value) ? field.value.join(', ') : '') : (field.value ?? '')
@@ -558,13 +661,25 @@ function FieldEditor({ field, msg, onSave }) {
     input = <input type="text" value={val} onChange={e => setVal(e.target.value)} placeholder={field.type === 'labels' ? 'comma-separated' : ''} />
   }
 
+  const sevColor = { High: '#c0392b', Medium: '#b5720a', Low: '#888', Critical: '#c0392b' };
+  const hasIssues = issues && issues.length > 0;
+
   return (
-    <div className="field-row">
+    <div className="field-row" style={{ flexWrap: 'wrap' }}>
       <span className="field-label">{field.label}</span>
       <span className={'field-state ' + (isSet ? 'set' : 'unset')}>{isSet ? 'set' : 'not set'}</span>
       {input}
       <button onClick={() => onSave(val)}>Save</button>
       <span style={{ fontSize: 12, color: '#888' }}>{msg}</span>
+      {hasIssues && (
+        <div style={{ width: '100%', paddingLeft: 240, marginTop: 2 }}>
+          {issues.map((iss, i) => (
+            <div key={i} style={{ fontSize: 12, color: sevColor[iss.severity] || '#888' }}>
+              ⚠ {iss.message}
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   )
 }

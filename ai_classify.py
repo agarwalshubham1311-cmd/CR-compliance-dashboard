@@ -1,20 +1,16 @@
-import os
 import json
 import re
-import requests
-
-OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434/v1/chat/completions")
-OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "llama3.1:8b")
+import bedrock_client
 
 
 def classify_status(raw_status, status_type, known_statuses):
     """
-    Ask the local LLM which of the already-known statuses this new one is
+    Ask the LLM which of the already-known statuses this new one is
     equivalent to, for compliance-phase purposes.
 
     known_statuses: list of status names already understood by compliance.py
     Returns: {"target": <one of known_statuses>, "confidence": "high"|"medium"|"low", "reasoning": str}
-    Raises requests.RequestException if Ollama is unreachable.
+    Raises RuntimeError if Bedrock is unreachable or misconfigured.
     """
     label = "Change Request" if status_type == "cr" else "Story"
     options = "\n".join(f"- {s}" for s in known_statuses)
@@ -34,20 +30,9 @@ one, even if none seem like a perfect match; choose the closest.
 Respond ONLY with JSON, no other text, in this exact shape:
 {{"target": "<one of the statuses from the list, verbatim>", "confidence": "high|medium|low", "reasoning": "<one sentence>"}}"""
 
-    resp = requests.post(
-        OLLAMA_URL,
-        json={
-            "model": OLLAMA_MODEL,
-            "messages": [{"role": "user", "content": prompt}],
-            "temperature": 0.1,
-            "max_tokens": 150,
-        },
-        timeout=60,
-    )
-    resp.raise_for_status()
-    content = resp.json()["choices"][0]["message"]["content"].strip()
+    content = bedrock_client.call_bedrock(prompt, max_tokens=150, temperature=0.1)
 
-    # Local models sometimes wrap JSON in markdown fences or add stray text —
+    # Models sometimes wrap JSON in markdown fences or add stray text —
     # extract the first {...} block defensively rather than trusting raw parse.
     match = re.search(r"\{.*\}", content, re.DOTALL)
     if not match:

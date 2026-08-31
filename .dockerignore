@@ -3,6 +3,7 @@ __pycache__/
 *.pyc
 compliance.db
 jira.env
+aws.env
 .env
 start.ps1
 .git/

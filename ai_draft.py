@@ -1,16 +1,11 @@
-import os
-import requests
-
-OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434/v1/chat/completions")
-OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "llama3.1:8b")
+import bedrock_client
 
 
 def draft_remediation_comment(target_key, target_status, target_desc, other_key, other_status, reason, severity):
-    """Ask the local LLM to draft a short Jira comment explaining a
+    """Ask the LLM to draft a short Jira comment explaining a
     phase-alignment compliance issue (Story vs CR, Epic vs CR, Story vs
     Outcome — any two-entity comparison) and suggesting next steps.
-    Returns plain text. Raises requests.RequestException if Ollama isn't
-    reachable.
+    Returns plain text. Raises RuntimeError if Bedrock isn't reachable.
 
     target_key/target_status: the entity the comment will be posted on
     (the one that needs to act — e.g. the lagging Story, the Epic, the Outcome)
@@ -33,11 +28,11 @@ Write a short, professional Jira comment (2-4 sentences) that:
 
 Do not use markdown formatting. Output only the comment text, nothing else."""
 
-    return _call_ollama(prompt, max_tokens=200)
+    return bedrock_client.call_bedrock(prompt, max_tokens=200)
 
 
 def draft_field_comment(entity_key, entity_status, findings):
-    """Ask the local LLM to draft a short Jira comment listing missing or
+    """Ask the LLM to draft a short Jira comment listing missing or
     invalid required fields and requesting they be completed.
 
     findings: list of dicts with at least 'field' and 'message' keys,
@@ -60,20 +55,4 @@ Write a short, professional Jira comment (2-4 sentences) that:
 
 Do not use markdown formatting. Output only the comment text, nothing else."""
 
-    return _call_ollama(prompt, max_tokens=200)
-
-
-def _call_ollama(prompt, max_tokens=200):
-    resp = requests.post(
-        OLLAMA_URL,
-        json={
-            "model": OLLAMA_MODEL,
-            "messages": [{"role": "user", "content": prompt}],
-            "temperature": 0.4,
-            "max_tokens": max_tokens,
-        },
-        timeout=60,
-    )
-    resp.raise_for_status()
-    data = resp.json()
-    return data["choices"][0]["message"]["content"].strip()
+    return bedrock_client.call_bedrock(prompt, max_tokens=200)

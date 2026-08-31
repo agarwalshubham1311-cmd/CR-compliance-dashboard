@@ -1,5 +1,6 @@
 import asyncio
 import os
+import threading
 
 from flask import Flask, jsonify, request, send_from_directory
 from mcp import ClientSession
@@ -576,6 +577,29 @@ async def _search_all_issues(session, jql, max_pages=50):
     return all_issues
 
 
+async def _discover_issues(session, base_jql, project_key=None, board_id=None):
+    """Finds issues matching base_jql (a type/label filter, e.g.
+    CR_DISCOVERY_JQL), optionally narrowed to one board or one project.
+
+    Board scoping uses Jira's separate Agile REST API (via jira_rest,
+    run in a thread so the synchronous `requests` call doesn't block the
+    event loop) — a board isn't a JQL-queryable concept, so this can't
+    reuse the normal MCP search path.
+
+    Project scoping just prepends a project filter onto the existing
+    JQL and reuses the normal MCP-based paginated search — no new API
+    needed for this one.
+
+    board_id takes priority if both are somehow set, since a board
+    already implies a specific project."""
+    if board_id:
+        return await asyncio.to_thread(jira_rest.search_board_issues, board_id, base_jql)
+    if project_key:
+        scoped_jql = f'project = "{project_key}" AND ({base_jql})'
+        return await _search_all_issues(session, scoped_jql)
+    return await _search_all_issues(session, base_jql)
+
+
 async def _fetch_raw_concurrent(keys):
     """Fetch raw Jira data (for field-completeness checks) for multiple
     issues concurrently instead of one blocking call at a time. Each
@@ -626,7 +650,7 @@ def _ensure_classified(status_type, raw_status):
     print(f"[ai_classify] learned: {status_type} '{raw_status}' -> '{result['target']}' ({result.get('confidence')})")
 
 
-async def _run_full_scan():
+async def _run_full_scan(project_key=None, board_id=None):
     import json as _json
     import uuid as _uuid
     import datetime
@@ -644,7 +668,7 @@ async def _run_full_scan():
         async with ClientSession(read, write) as session:
             await session.initialize()
 
-            crs = await _search_all_issues(session, CR_DISCOVERY_JQL)
+            crs = await _discover_issues(session, CR_DISCOVERY_JQL, project_key, board_id)
             print(f"[scan] discovered {len(crs)} CRs, fetching field data concurrently...")
             cr_raw_by_key = await _fetch_raw_concurrent([cr.get("key") for cr in crs])
 
@@ -703,7 +727,7 @@ async def _run_full_scan():
                     })
 
             # Epic <- CR bottleneck check, using the Epic Links collected above.
-            epics = await _search_all_issues(session, EPIC_DISCOVERY_JQL)
+            epics = await _discover_issues(session, EPIC_DISCOVERY_JQL, project_key, board_id)
             print(f"[scan] discovered {len(epics)} Epics, fetching field data concurrently...")
             epic_raw_by_key = await _fetch_raw_concurrent([epic.get("key") for epic in epics])
 
@@ -730,7 +754,7 @@ async def _run_full_scan():
                 })
 
             # Outcome field-completeness + Story <- Outcome phase alignment
-            outcomes = await _search_all_issues(session, OUTCOME_DISCOVERY_JQL)
+            outcomes = await _discover_issues(session, OUTCOME_DISCOVERY_JQL, project_key, board_id)
             print(f"[scan] discovered {len(outcomes)} Outcomes, fetching field data concurrently...")
             outcome_raw_by_key = await _fetch_raw_concurrent([o.get("key") for o in outcomes])
 
@@ -835,6 +859,12 @@ _FIELD_MAPS = {
     "outcome": (field_rules.OUTCOME_FIELDS, field_rules.OUTCOME_FIELD_LABELS, field_rules.OUTCOME_FIELD_TYPES),
 }
 
+_CHECK_FUNCS = {
+    "cr": field_rules.check_cr_fields,
+    "epic": field_rules.check_epic_fields,
+    "outcome": field_rules.check_outcome_fields,
+}
+
 
 @app.route("/api/entities/<entity_type>/<entity_key>/fields", methods=["GET"])
 def get_entity_current_fields(entity_type, entity_key):
@@ -882,6 +912,22 @@ def apply_transition():
         result = jira_rest.transition_issue(issue_key, transition_id)
     except Exception as e:
         return jsonify({"error": f"Transition failed: {e}"}), 500
+
+    # A status change can cascade across multiple stored relationships
+    # (this issue as a Story vs its CR, or as a CR feeding an Epic's
+    # bottleneck check, etc.) — rather than trying to patch every
+    # possibly-affected row precisely, trigger a full rescan in the
+    # background so the dashboard is correct again within moments,
+    # without blocking this response on a scan that could take a while
+    # at scale.
+    def _background_rescan():
+        try:
+            run_async(_run_full_scan())
+        except Exception as e:
+            print(f"[transition] background rescan after {issue_key} failed: {e}")
+
+    threading.Thread(target=_background_rescan, daemon=True).start()
+
     return jsonify({"transitioned": True, "issue_key": issue_key, **result})
 
 
@@ -911,6 +957,24 @@ def update_field():
         return jsonify({"error": f"Update failed: {e}. If this is a select field, "
                                   f"the value/options here may not match Jira's real "
                                   f"options — check Project Settings → Fields."}), 500
+
+    # Re-check this one entity immediately and patch the stored findings —
+    # without this, the dashboard keeps showing the OLD (pre-edit) result
+    # until the next full scan, since it reads stored scan results, not
+    # live Jira data. Best-effort: if the re-check fails, the write to
+    # Jira already succeeded, so we still report success — the next
+    # scheduled scan will catch up regardless.
+    try:
+        run_id = compliance_db.latest_field_run_id()
+        if run_id:
+            raw = jira_rest.get_issue_raw(issue_key)
+            fresh_status = (raw.get("fields", {}).get("status") or {}).get("name")
+            check_func = _CHECK_FUNCS[entity_type]
+            fresh_findings = check_func(raw.get("fields", {}), fresh_status)
+            compliance_db.replace_field_findings_for_entity(run_id, entity_type, issue_key, fresh_status, fresh_findings)
+    except Exception as e:
+        print(f"[update_field] wrote to Jira OK but immediate re-check failed for {issue_key}: {e}")
+
     return jsonify({"updated": True, "issue_key": issue_key, "field_key": field_key, **result})
 
 
@@ -958,7 +1022,10 @@ def manual_prune():
 
 @app.route("/api/dashboard/refresh", methods=["POST"])
 def dashboard_refresh():
-    result = run_async(_run_full_scan())
+    body = request.get_json(silent=True) or {}
+    project_key = (body.get("project_key") or "").strip() or None
+    board_id = body.get("board_id") or None
+    result = run_async(_run_full_scan(project_key=project_key, board_id=board_id))
     if isinstance(result, dict) and "error" in result:
         return jsonify(result), 500
     return jsonify(result)
@@ -967,7 +1034,29 @@ def dashboard_refresh():
 @app.route("/api/config", methods=["GET"])
 def get_frontend_config():
     jira_url = os.environ.get("JIRA_URL", "").rstrip("/")
-    return jsonify({"jira_base": f"{jira_url}/browse/" if jira_url else ""})
+    return jsonify({
+        "jira_base": f"{jira_url}/browse/" if jira_url else "",
+        "default_project_key": os.environ.get("DEFAULT_PROJECT_KEY", ""),
+    })
+
+
+@app.route("/api/jira/projects", methods=["GET"])
+def list_projects():
+    try:
+        projects = jira_rest.get_projects()
+    except Exception as e:
+        return jsonify({"error": f"Could not fetch projects: {e}"}), 500
+    return jsonify({"items": projects, "default_project_key": os.environ.get("DEFAULT_PROJECT_KEY", "")})
+
+
+@app.route("/api/jira/boards", methods=["GET"])
+def list_boards():
+    project_key = request.args.get("project_key") or None
+    try:
+        boards = jira_rest.get_boards(project_key=project_key)
+    except Exception as e:
+        return jsonify({"error": f"Could not fetch boards: {e}"}), 500
+    return jsonify({"items": boards})
 
 
 @app.route("/api/dashboard/summary", methods=["GET"])

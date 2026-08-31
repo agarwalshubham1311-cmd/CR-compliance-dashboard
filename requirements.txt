@@ -3,3 +3,4 @@ mcp==1.9.0
 apscheduler==3.10.4
 requests==2.32.3
 truststore==0.9.2
+boto3==1.35.36

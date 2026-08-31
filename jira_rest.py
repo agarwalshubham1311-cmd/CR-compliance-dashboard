@@ -94,3 +94,89 @@ def update_issue_fields(issue_key, fields_payload):
     resp = requests.put(url, json={"fields": fields_payload}, auth=_auth(), timeout=30)
     resp.raise_for_status()
     return {"success": True}
+
+
+def get_projects():
+    """Every Jira project these credentials can see. Uses the paginated
+    project/search endpoint (the older /project endpoint is deprecated)."""
+    _require_creds()
+    url = f"{JIRA_URL.rstrip('/')}/rest/api/3/project/search"
+    projects, start_at = [], 0
+    while True:
+        resp = requests.get(url, params={"startAt": start_at, "maxResults": 50}, auth=_auth(), timeout=30)
+        resp.raise_for_status()
+        data = resp.json()
+        for p in data.get("values", []):
+            projects.append({"key": p.get("key"), "name": p.get("name")})
+        if data.get("isLast", True):
+            break
+        start_at += data.get("maxResults", 50)
+    return projects
+
+
+def get_boards(project_key=None):
+    """Boards (Scrum/Kanban) visible to these credentials, optionally
+    scoped to one project. Boards live under Jira's separate Agile REST
+    API (/rest/agile/1.0/), not the standard /rest/api/3/ used
+    everywhere else in this file — a board isn't a JQL-queryable concept,
+    it's tied to a filter configured on the board itself."""
+    _require_creds()
+    url = f"{JIRA_URL.rstrip('/')}/rest/agile/1.0/board"
+    params = {"maxResults": 50}
+    if project_key:
+        params["projectKeyOrId"] = project_key
+    boards, start_at = [], 0
+    while True:
+        params["startAt"] = start_at
+        resp = requests.get(url, params=params, auth=_auth(), timeout=30)
+        resp.raise_for_status()
+        data = resp.json()
+        for b in data.get("values", []):
+            boards.append({"id": b.get("id"), "name": b.get("name"), "type": b.get("type")})
+        if data.get("isLast", True):
+            break
+        start_at += data.get("maxResults", 50)
+    return boards
+
+
+def _normalize_agile_issue(raw):
+    """The Agile API returns issues in the standard Jira REST shape
+    ({"key": ..., "fields": {"status": {...}, "issuetype": {...}}}) —
+    different from mcp-atlassian's flattened tool-response shape
+    ({"key": ..., "status": {...}, "issue_type": {...}}) that the rest
+    of the scan code (app.py's _run_full_scan) already expects. This
+    normalizes one Agile API issue into that same flattened shape, so
+    board-scoped and non-board-scoped scans can share all the same
+    downstream processing without any branching."""
+    fields = raw.get("fields", {}) or {}
+    return {
+        "key": raw.get("key"),
+        "status": fields.get("status") or {},
+        "issue_type": fields.get("issuetype") or {},
+    }
+
+
+def search_board_issues(board_id, jql=None, max_pages=50):
+    """All issues on a board, optionally further filtered by jql (e.g.
+    restricting to CR/Epic/Outcome types) — the Agile API's board/issue
+    endpoint accepts an additional jql param layered on top of the
+    board's own configured filter. Paginates via startAt/isLast (a
+    different pagination style than mcp-atlassian's page_token, since
+    this is a different API family). Returns issues already normalized
+    to match the rest of the scan code's expected shape."""
+    _require_creds()
+    url = f"{JIRA_URL.rstrip('/')}/rest/agile/1.0/board/{board_id}/issue"
+    params = {"maxResults": 50}
+    if jql:
+        params["jql"] = jql
+    issues, start_at = [], 0
+    for _ in range(max_pages):
+        params["startAt"] = start_at
+        resp = requests.get(url, params=params, auth=_auth(), timeout=30)
+        resp.raise_for_status()
+        data = resp.json()
+        issues.extend(_normalize_agile_issue(i) for i in data.get("issues", []))
+        if data.get("isLast", True) or not data.get("issues"):
+            break
+        start_at += data.get("maxResults", 50)
+    return issues

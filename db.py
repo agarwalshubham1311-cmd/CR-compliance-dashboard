@@ -197,6 +197,24 @@ def latest_run_id():
     return row["run_id"] if row else None
 
 
+def latest_field_run_id():
+    """The run_id currently considered 'latest' for field_findings
+    specifically — NOT the same value as latest_run_id(), which queries
+    the runs/checks tables. A full scan generates two separate run_ids
+    (one inside save_run() for checks, a different one — field_run_id —
+    used for all field_findings) and get_latest_field_findings() picks
+    'latest' by looking at field_findings' own most-recent checked_at.
+    Any code that patches a single entity's field_findings (e.g. right
+    after a live field edit) MUST use this run_id, not latest_run_id(),
+    or the patched row gets orphaned under a run_id no other entity's
+    data shares — which is exactly what caused CR/Outcome rows to
+    disappear after an Epic-only edit before this fix."""
+    conn = get_conn()
+    row = conn.execute("SELECT run_id FROM field_findings ORDER BY checked_at DESC LIMIT 1").fetchone()
+    conn.close()
+    return row["run_id"] if row else None
+
+
 def get_resolved_keys():
     conn = get_conn()
     rows = conn.execute("SELECT story_key, cr_key FROM resolutions").fetchall()
@@ -241,6 +259,33 @@ def save_field_findings(run_id, entity_type, entity_key, entity_status, findings
         return
     now = time.time()
     conn = get_conn()
+    for f in findings:
+        conn.execute(
+            """INSERT INTO field_findings
+               (run_id, entity_type, entity_key, entity_status, check_name, field, severity, message, checked_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (run_id, entity_type, entity_key, entity_status, f["check"], f.get("field"),
+             f["severity"], f["message"], now),
+        )
+    conn.commit()
+    conn.close()
+
+
+def replace_field_findings_for_entity(run_id, entity_type, entity_key, entity_status, findings):
+    """Replace all field_findings rows for ONE entity within the given run.
+    Used right after a direct field edit (via the editable-fields UI) so
+    the dashboard reflects the change immediately — without this, a saved
+    field stays showing as "missing" in the UI until the next full scan
+    re-checks it, since the dashboard reads stored scan results, not live
+    Jira data. Deletes existing rows for this (run_id, entity_type,
+    entity_key) first, since the number/shape of findings can change
+    (e.g. a field that was missing now has no finding at all)."""
+    now = time.time()
+    conn = get_conn()
+    conn.execute(
+        "DELETE FROM field_findings WHERE run_id = ? AND entity_type = ? AND entity_key = ?",
+        (run_id, entity_type, entity_key),
+    )
     for f in findings:
         conn.execute(
             """INSERT INTO field_findings

@@ -13,19 +13,6 @@ services:
     networks:
       - compliance-net
 
-  ollama:
-    build:
-      context: .
-      dockerfile: Dockerfile.ollama
-    container_name: ollama
-    ports:
-      - "11434:11434"
-    volumes:
-      - ollama-data:/root/.ollama
-    restart: unless-stopped
-    networks:
-      - compliance-net
-
   flask-app:
     build:
       context: .
@@ -35,16 +22,16 @@ services:
       - "5000:5000"
     env_file:
       - jira.env
+      - aws.env
     environment:
       - MCP_SERVER_URL=http://jira-mcp:8000/sse
-      - OLLAMA_URL=http://ollama:11434/v1/chat/completions
+      - BEDROCK_MODEL_ID=${BEDROCK_MODEL_ID:-amazon.nova-lite-v1:0}
       - SCAN_INTERVAL_MINUTES=${SCAN_INTERVAL_MINUTES:-15}
       - RETENTION_DAYS=${RETENTION_DAYS:-7}
     volumes:
       - compliance-data:/app/data
     depends_on:
       - jira-mcp
-      - ollama
     restart: unless-stopped
     networks:
       - compliance-net
@@ -54,5 +41,4 @@ networks:
     driver: bridge
 
 volumes:
-  ollama-data:
   compliance-data:
