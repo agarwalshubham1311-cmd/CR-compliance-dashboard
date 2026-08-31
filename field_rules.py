@@ -6,6 +6,7 @@ Field IDs confirmed against real TPOC-12 (CR), TPOC-44 (Epic), TPOC-68
 (Outcome) issues.
 """
 import datetime
+import re
 
 CR_FIELDS = {
     "epic_link": "customfield_10014",
@@ -97,6 +98,17 @@ def format_field_value(field_key, field_type, raw_value):
     expects for that field type."""
     if raw_value is None or raw_value == "":
         return None
+    if field_key == "epic_link" and isinstance(raw_value, str):
+        # Epic Link sometimes ends up holding a full browse URL instead
+        # of a plain issue key (e.g. someone pasted it from the browser
+        # address bar directly into the field in Jira) - Jira's own
+        # write-side validation rejects a URL here even though it
+        # apparently allowed one to be stored some other way originally.
+        # Extract the trailing "PROJECTKEY-123" key from whatever was
+        # typed, whether that's already a clean key or a full URL.
+        match = re.search(r"([A-Za-z][A-Za-z0-9]*-\d+)\s*$", raw_value.strip())
+        if match:
+            raw_value = match.group(1)
     if field_type == "select":
         return {"value": raw_value} if field_key != "priority" else {"name": raw_value}
     if field_type == "labels":

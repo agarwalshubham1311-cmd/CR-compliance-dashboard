@@ -92,7 +92,21 @@ def update_issue_fields(issue_key, fields_payload):
     _require_creds()
     url = f"{JIRA_URL.rstrip('/')}/rest/api/3/issue/{issue_key}"
     resp = requests.put(url, json={"fields": fields_payload}, auth=_auth(), timeout=30)
-    resp.raise_for_status()
+    if not resp.ok:
+        # Jira's error body has the actual reason (which field, why) —
+        # without this, all we'd see is a generic "400 Bad Request",
+        # which isn't enough to know what to fix.
+        detail = None
+        try:
+            body = resp.json()
+            parts = list(body.get("errorMessages", []))
+            for field_id, msg in (body.get("errors") or {}).items():
+                parts.append(f"{field_id}: {msg}")
+            if parts:
+                detail = "; ".join(parts)
+        except Exception:
+            pass
+        raise RuntimeError(f"Jira rejected the update ({resp.status_code}): {detail or resp.text[:300]}")
     return {"success": True}
 
 

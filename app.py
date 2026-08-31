@@ -534,7 +534,7 @@ def cr_mismatches():
 # This is what the scheduler calls on a timer, and what /refresh calls
 # on demand.
 # ---------------------------------------------------------------------------
-CR_DISCOVERY_JQL = os.environ.get("CR_DISCOVERY_JQL", 'labels = "CR"')
+CR_DISCOVERY_JQL = os.environ.get("CR_DISCOVERY_JQL", 'issuetype = "Change Request"')
 OUTCOME_DISCOVERY_JQL = os.environ.get("OUTCOME_DISCOVERY_JQL", 'issuetype = "Outcome"')
 EPIC_DISCOVERY_JQL = os.environ.get("EPIC_DISCOVERY_JQL", 'issuetype = "Epic"')
 
@@ -598,6 +598,36 @@ async def _discover_issues(session, base_jql, project_key=None, board_id=None):
         scoped_jql = f'project = "{project_key}" AND ({base_jql})'
         return await _search_all_issues(session, scoped_jql)
     return await _search_all_issues(session, base_jql)
+
+
+async def _linked_issues_concurrent(session, keys, limit=None):
+    """Finds linked issues for multiple entities (CRs or Outcomes)
+    concurrently instead of one sequential MCP round-trip per entity —
+    confirmed as the dominant cost in scan time at any real scale (each
+    linkedIssues() search is a full network round-trip to Jira; 9
+    sequential searches alone measured ~12s in testing, meaning 1,000+
+    entities would take 20+ minutes done one at a time).
+
+    Bounded by a semaphore, same reasoning as _fetch_raw_concurrent.
+    Reuses the existing, already-correct _search_all_issues machinery
+    per call rather than a new API path — MCP's JSON-RPC transport
+    correlates concurrent in-flight requests by ID, so multiple calls
+    on one shared session are safe by design, not something bolted on.
+    Returns {key: [issues]} — a failed lookup for one key logs and
+    returns an empty list for that key rather than aborting the batch."""
+    sem = asyncio.Semaphore(limit or CONCURRENT_FETCH_LIMIT)
+    results = {}
+
+    async def _one(key):
+        async with sem:
+            try:
+                results[key] = await _search_all_issues(session, f'issue in linkedIssues("{key}")')
+            except Exception as e:
+                print(f"[scan] could not fetch linked issues for {key}: {e}")
+                results[key] = []
+
+    await asyncio.gather(*(_one(k) for k in keys))
+    return results
 
 
 async def _fetch_raw_concurrent(keys):
@@ -671,6 +701,8 @@ async def _run_full_scan(project_key=None, board_id=None):
             crs = await _discover_issues(session, CR_DISCOVERY_JQL, project_key, board_id)
             print(f"[scan] discovered {len(crs)} CRs, fetching field data concurrently...")
             cr_raw_by_key = await _fetch_raw_concurrent([cr.get("key") for cr in crs])
+            print(f"[scan] fetching linked stories for {len(crs)} CRs concurrently...")
+            cr_linked_by_key = await _linked_issues_concurrent(session, [cr.get("key") for cr in crs])
 
             for cr in crs:
                 cr_key = cr.get("key")
@@ -696,7 +728,7 @@ async def _run_full_scan(project_key=None, board_id=None):
                     if epic_key:
                         epic_to_cr_entries.setdefault(epic_key, []).append((cr_key, cr_status))
 
-                linked = await _search_all_issues(session, f'issue in linkedIssues("{cr_key}")')
+                linked = cr_linked_by_key.get(cr_key, [])
 
                 for issue in linked:
                     if (issue.get("issue_type") or {}).get("name") != "Story":
@@ -757,6 +789,8 @@ async def _run_full_scan(project_key=None, board_id=None):
             outcomes = await _discover_issues(session, OUTCOME_DISCOVERY_JQL, project_key, board_id)
             print(f"[scan] discovered {len(outcomes)} Outcomes, fetching field data concurrently...")
             outcome_raw_by_key = await _fetch_raw_concurrent([o.get("key") for o in outcomes])
+            print(f"[scan] fetching linked stories for {len(outcomes)} Outcomes concurrently...")
+            outcome_linked_by_key = await _linked_issues_concurrent(session, [o.get("key") for o in outcomes])
 
             for outcome in outcomes:
                 outcome_key = outcome.get("key")
@@ -768,7 +802,7 @@ async def _run_full_scan(project_key=None, board_id=None):
                     outcome_findings = field_rules.check_outcome_fields(raw.get("fields", {}), outcome_status)
                     field_findings_by_entity.append(("outcome", outcome_key, outcome_status, outcome_findings))
 
-                outcome_linked = await _search_all_issues(session, f'issue in linkedIssues("{outcome_key}")')
+                outcome_linked = outcome_linked_by_key.get(outcome_key, [])
 
                 for issue in outcome_linked:
                     if (issue.get("issue_type") or {}).get("name") != "Story":
@@ -1223,4 +1257,9 @@ if __name__ == "__main__":
         start_scheduler()
     elif os.environ.get("WERKZEUG_RUN_MAIN") == "true":
         start_scheduler()
-    app.run(host="0.0.0.0", port=5000, debug=True)
+    # threaded=True lets the server handle multiple requests at once —
+    # without it, the dashboard's 6 parallel fetch() calls (loadAll())
+    # get serialized one at a time server-side, adding their individual
+    # latencies together instead of overlapping. This was the actual
+    # cause of "scan finishes fine, but the display update lags."
+    app.run(host="0.0.0.0", port=5000, debug=True, threaded=True)
