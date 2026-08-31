@@ -9,17 +9,17 @@ import datetime
 import re
 
 CR_FIELDS = {
-    "epic_link": "customfield_10006",
-    "complexity": "customfield_15904",
-    "funded_by": "customfield_20702",
-    "baseline_target_delivery_date": "customfield_15801",
+    "epic_link": "customfield_10014",
+    "complexity": "customfield_10109",
+    "funded_by": "customfield_10106",
+    "baseline_target_delivery_date": "customfield_10110",
     "baseline_prp_date": "customfield_10108",
-    "actual_prp_start_date": "customfield_10107", #not found
-    "prp_status": "customfield_10111",  #not found
-    "release_through": "customfield_26025",
-    "target_delivery_date": "customfield_18103",
-    "reason_for_delay": "customfield_19600",
-    "blocked_by_dependency": "customfield_10150", #not found
+    "actual_prp_start_date": "customfield_10107",
+    "prp_status": "customfield_10111",
+    "release_through": "customfield_10113",
+    "target_delivery_date": "customfield_10112",
+    "reason_for_delay": "customfield_10149",
+    "blocked_by_dependency": "customfield_10150",
 }
 
 OUTCOME_FIELDS = {
@@ -31,12 +31,12 @@ OUTCOME_FIELDS = {
 
 EPIC_FIELDS = {
     "due_date": "duedate",
-    "target_delivery_date": "customfield_18103",  # Epic's OWN field — distinct from CR/Outcome's customfield_10112
+    "target_delivery_date": "customfield_10184",  # Epic's OWN field — distinct from CR/Outcome's customfield_10112
     "description": "description",
     "labels": "labels",
     "priority": "priority",
-    "pi": "customfield_21699",
-    "delivery_data_confidence": "customfield_21663",
+    "pi": "customfield_10183",
+    "delivery_data_confidence": "customfield_10185",
 }
 
 # Human-readable labels for each field key, used by the /api/entities/*
