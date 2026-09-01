@@ -14,12 +14,12 @@ CR_FIELDS = {
     "funded_by": "customfield_10106",
     "baseline_target_delivery_date": "customfield_10110",
     "baseline_prp_date": "customfield_10108",
-    "actual_prp_start_date": "customfield_10107",
-    "prp_status": "customfield_10111",
-    "release_through": "customfield_10113",
-    "target_delivery_date": "customfield_10112",
-    "reason_for_delay": "customfield_10149",
-    "blocked_by_dependency": "customfield_10150",
+    "actual_prp_start_date": "customfield_28402",
+    "prp_status": "customfield_20314",
+    "release_through": "customfield_26025",
+    "target_delivery_date": "customfield_18103",
+    "reason_for_delay": "customfield_19600",
+    "blocked_by_dependency": "customfield_21041",
 }
 
 OUTCOME_FIELDS = {
