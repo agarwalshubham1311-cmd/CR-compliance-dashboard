@@ -116,3 +116,6 @@ a.key-link { color: var(--text-accent); text-decoration: none; }
 .field-row .field-msg { font-size: 12px; flex: 1; }
 .field-row .field-msg.overdue { color: var(--red); }
 .field-row .field-msg.ok { color: var(--text-muted); }
+
+.issue-title { font-size: 11px; color: var(--text-muted); margin-top: 2px; font-weight: normal; cursor: pointer; }
+.issue-title:hover { color: var(--text-accent); text-decoration: underline; }

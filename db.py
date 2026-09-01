@@ -73,6 +73,33 @@ def init_db():
             checked_at REAL
         )
     """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS discovered_field_mappings (
+            entity_type TEXT,
+            field_key TEXT,
+            jira_field_id TEXT,
+            jira_label TEXT,
+            confidence TEXT,
+            reasoning TEXT,
+            created_at REAL,
+            reviewed INTEGER DEFAULT 0,
+            PRIMARY KEY (entity_type, field_key)
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS issue_summaries (
+            issue_key TEXT PRIMARY KEY,
+            summary TEXT,
+            updated_at REAL
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS issue_scrum_teams (
+            issue_key TEXT PRIMARY KEY,
+            scrum_team TEXT,
+            updated_at REAL
+        )
+    """)
     conn.execute("CREATE INDEX IF NOT EXISTS idx_field_findings_run ON field_findings(run_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_checks_run ON checks(run_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_checks_story_cr ON checks(story_key, cr_key)")
@@ -339,6 +366,73 @@ def mark_status_mapping_reviewed(status_type, raw_status):
     conn.close()
 
 
+def save_discovered_field_mapping(entity_type, field_key, jira_field_id, jira_label, confidence, reasoning):
+    """Saves an AI-suggested field mapping as UNREVIEWED — it is not used
+    for any real read/write until a human confirms it via
+    mark_field_mapping_reviewed(). A wrong field mapping means writing
+    to the wrong Jira field, which is higher-stakes than a wrong status
+    guess, so unlike status_mappings this never auto-applies."""
+    conn = get_conn()
+    conn.execute(
+        """INSERT OR REPLACE INTO discovered_field_mappings
+           (entity_type, field_key, jira_field_id, jira_label, confidence, reasoning, created_at, reviewed)
+           VALUES (?, ?, ?, ?, ?, ?, ?, 0)""",
+        (entity_type, field_key, jira_field_id, jira_label, confidence, reasoning, time.time()),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_discovered_field_mappings(entity_type=None):
+    conn = get_conn()
+    if entity_type:
+        rows = conn.execute("SELECT * FROM discovered_field_mappings WHERE entity_type = ?", (entity_type,)).fetchall()
+    else:
+        rows = conn.execute("SELECT * FROM discovered_field_mappings").fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_confirmed_field_mappings(entity_type=None):
+    """Only mappings a human has explicitly confirmed — these are the
+    ones actually safe to use for real field reads/writes."""
+    conn = get_conn()
+    if entity_type:
+        rows = conn.execute(
+            "SELECT * FROM discovered_field_mappings WHERE entity_type = ? AND reviewed = 1", (entity_type,)
+        ).fetchall()
+    else:
+        rows = conn.execute("SELECT * FROM discovered_field_mappings WHERE reviewed = 1").fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def mark_field_mapping_reviewed(entity_type, field_key, approved_jira_field_id=None):
+    """Confirms a suggested mapping. If approved_jira_field_id is given,
+    it overrides the AI's suggestion (a human correcting a wrong guess)
+    before marking it reviewed."""
+    conn = get_conn()
+    if approved_jira_field_id:
+        conn.execute(
+            "UPDATE discovered_field_mappings SET jira_field_id = ?, reviewed = 1 WHERE entity_type = ? AND field_key = ?",
+            (approved_jira_field_id, entity_type, field_key),
+        )
+    else:
+        conn.execute(
+            "UPDATE discovered_field_mappings SET reviewed = 1 WHERE entity_type = ? AND field_key = ?",
+            (entity_type, field_key),
+        )
+    conn.commit()
+    conn.close()
+
+
+def delete_discovered_field_mapping(entity_type, field_key):
+    conn = get_conn()
+    conn.execute("DELETE FROM discovered_field_mappings WHERE entity_type = ? AND field_key = ?", (entity_type, field_key))
+    conn.commit()
+    conn.close()
+
+
 def get_latest_summary():
     run_id = latest_run_id()
     if not run_id:
@@ -403,3 +497,68 @@ def get_trend(days=14):
         rate = round(((total - non_compliant) / total) * 100)
         trend.append({"run_id": run["run_id"], "checked_at": run["started_at"], "compliance_rate": rate})
     return trend
+
+
+def save_issue_summaries(summaries):
+    """summaries: dict of {issue_key: summary_text}. Bulk upsert, called
+    once per scan with every discovered issue's title — decoupled from
+    the checks table schema (and its cr_key/story_key column reuse
+    quirks across pair types) so displaying a title never risks that
+    fragile schema."""
+    if not summaries:
+        return
+    now = time.time()
+    conn = get_conn()
+    for key, summary in summaries.items():
+        if not key:
+            continue
+        conn.execute(
+            "INSERT OR REPLACE INTO issue_summaries (issue_key, summary, updated_at) VALUES (?, ?, ?)",
+            (key, summary or "", now),
+        )
+    conn.commit()
+    conn.close()
+
+
+def get_issue_summaries(keys=None):
+    """Returns {issue_key: summary}. If keys is given, only those;
+    otherwise every summary currently stored."""
+    conn = get_conn()
+    if keys:
+        placeholders = ",".join("?" * len(keys))
+        rows = conn.execute(f"SELECT issue_key, summary FROM issue_summaries WHERE issue_key IN ({placeholders})", keys).fetchall()
+    else:
+        rows = conn.execute("SELECT issue_key, summary FROM issue_summaries").fetchall()
+    conn.close()
+    return {r["issue_key"]: r["summary"] for r in rows}
+
+
+def save_issue_scrum_teams(teams):
+    """teams: dict of {issue_key: scrum_team_name}. Same pattern as
+    save_issue_summaries — decoupled lookup table, bulk-upserted once
+    per scan."""
+    if not teams:
+        return
+    now = time.time()
+    conn = get_conn()
+    for key, team in teams.items():
+        if not key or not team:
+            continue
+        conn.execute(
+            "INSERT OR REPLACE INTO issue_scrum_teams (issue_key, scrum_team, updated_at) VALUES (?, ?, ?)",
+            (key, team, now),
+        )
+    conn.commit()
+    conn.close()
+
+
+def get_issue_scrum_teams(keys=None):
+    """Returns {issue_key: scrum_team}."""
+    conn = get_conn()
+    if keys:
+        placeholders = ",".join("?" * len(keys))
+        rows = conn.execute(f"SELECT issue_key, scrum_team FROM issue_scrum_teams WHERE issue_key IN ({placeholders})", keys).fetchall()
+    else:
+        rows = conn.execute("SELECT issue_key, scrum_team FROM issue_scrum_teams").fetchall()
+    conn.close()
+    return {r["issue_key"]: r["scrum_team"] for r in rows}

@@ -535,6 +535,10 @@ def cr_mismatches():
 # on demand.
 # ---------------------------------------------------------------------------
 CR_DISCOVERY_JQL = os.environ.get("CR_DISCOVERY_JQL", 'issuetype = "Change Request"')
+
+# Scrum Team is a filter dimension, not a mandatory field check, so it
+# lives here rather than in field_rules.py's CR/EPIC/OUTCOME_FIELDS.
+SCRUM_TEAM_FIELD_ID = os.environ.get("SCRUM_TEAM_FIELD_ID", "customfield_21304")
 OUTCOME_DISCOVERY_JQL = os.environ.get("OUTCOME_DISCOVERY_JQL", 'issuetype = "Outcome"')
 EPIC_DISCOVERY_JQL = os.environ.get("EPIC_DISCOVERY_JQL", 'issuetype = "Epic"')
 
@@ -691,18 +695,26 @@ async def _run_full_scan(project_key=None, board_id=None):
     results = []
     field_findings_by_entity = []  # [(entity_type, entity_key, entity_status, findings)]
     epic_to_cr_entries = {}  # epic_key -> [(cr_key, cr_status), ...]
+    outcome_to_epic_entries = {}  # outcome_key -> [(epic_key, epic_status), ...] — an Epic's parent is an Outcome
     epic_results = []
     outcome_results = []
+    outcome_epic_results = []
+    issue_summaries = {}  # issue_key -> summary/title, collected from every discovery point below
+    issue_scrum_teams = {}  # issue_key -> Scrum Team value, collected from CR/Epic/Outcome raw data
 
     async with sse_client(MCP_SERVER_URL) as (read, write):
         async with ClientSession(read, write) as session:
             await session.initialize()
 
             crs = await _discover_issues(session, CR_DISCOVERY_JQL, project_key, board_id)
+            issue_summaries.update({c.get("key"): c.get("summary") for c in crs})
             print(f"[scan] discovered {len(crs)} CRs, fetching field data concurrently...")
             cr_raw_by_key = await _fetch_raw_concurrent([cr.get("key") for cr in crs])
             print(f"[scan] fetching linked stories for {len(crs)} CRs concurrently...")
             cr_linked_by_key = await _linked_issues_concurrent(session, [cr.get("key") for cr in crs])
+            for _linked_list in cr_linked_by_key.values():
+                issue_summaries.update({i.get("key"): i.get("summary") for i in _linked_list})
+            cr_field_map = _effective_field_map("cr")
 
             for cr in crs:
                 cr_key = cr.get("key")
@@ -716,15 +728,18 @@ async def _run_full_scan(project_key=None, board_id=None):
                 raw = cr_raw_by_key.get(cr_key)
                 if raw is not None:
                     raw_fields = raw.get("fields", {})
-                    cr_findings = field_rules.check_cr_fields(raw_fields, cr_status)
+                    cr_findings = field_rules.check_cr_fields(raw_fields, cr_status, field_map=cr_field_map)
                     field_findings_by_entity.append(("cr", cr_key, cr_status, cr_findings))
+                    scrum_team = field_rules._value(raw_fields, SCRUM_TEAM_FIELD_ID)
+                    if scrum_team:
+                        issue_scrum_teams[cr_key] = scrum_team
 
                     epic_key = None
                     parent = raw_fields.get("parent")
                     if parent and isinstance(parent, dict):
                         epic_key = parent.get("key")
                     if not epic_key:
-                        epic_key = raw_fields.get(field_rules.CR_FIELDS["epic_link"])
+                        epic_key = raw_fields.get(cr_field_map["epic_link"])
                     if epic_key:
                         epic_to_cr_entries.setdefault(epic_key, []).append((cr_key, cr_status))
 
@@ -760,8 +775,10 @@ async def _run_full_scan(project_key=None, board_id=None):
 
             # Epic <- CR bottleneck check, using the Epic Links collected above.
             epics = await _discover_issues(session, EPIC_DISCOVERY_JQL, project_key, board_id)
+            issue_summaries.update({e.get("key"): e.get("summary") for e in epics})
             print(f"[scan] discovered {len(epics)} Epics, fetching field data concurrently...")
             epic_raw_by_key = await _fetch_raw_concurrent([epic.get("key") for epic in epics])
+            epic_field_map = _effective_field_map("epic")
 
             for epic in epics:
                 epic_key = epic.get("key")
@@ -770,8 +787,21 @@ async def _run_full_scan(project_key=None, board_id=None):
 
                 raw = epic_raw_by_key.get(epic_key)
                 if raw is not None:
-                    epic_findings = field_rules.check_epic_fields(raw.get("fields", {}), epic_status)
+                    epic_fields = raw.get("fields", {})
+                    epic_findings = field_rules.check_epic_fields(epic_fields, epic_status, field_map=epic_field_map)
                     field_findings_by_entity.append(("epic", epic_key, epic_status, epic_findings))
+                    scrum_team = field_rules._value(epic_fields, SCRUM_TEAM_FIELD_ID)
+                    if scrum_team:
+                        issue_scrum_teams[epic_key] = scrum_team
+
+                    # An Epic's parent is an Outcome — same "parent" field
+                    # convention already used for CR's parent Epic lookup.
+                    outcome_key = None
+                    parent = epic_fields.get("parent")
+                    if parent and isinstance(parent, dict):
+                        outcome_key = parent.get("key")
+                    if outcome_key:
+                        outcome_to_epic_entries.setdefault(outcome_key, []).append((epic_key, epic_status))
 
                 cr_entries = epic_to_cr_entries.get(epic_key, [])
                 verdict = compliance_rules.evaluate_epic(epic_status, cr_entries)
@@ -787,10 +817,14 @@ async def _run_full_scan(project_key=None, board_id=None):
 
             # Outcome field-completeness + Story <- Outcome phase alignment
             outcomes = await _discover_issues(session, OUTCOME_DISCOVERY_JQL, project_key, board_id)
+            issue_summaries.update({o.get("key"): o.get("summary") for o in outcomes})
             print(f"[scan] discovered {len(outcomes)} Outcomes, fetching field data concurrently...")
             outcome_raw_by_key = await _fetch_raw_concurrent([o.get("key") for o in outcomes])
             print(f"[scan] fetching linked stories for {len(outcomes)} Outcomes concurrently...")
             outcome_linked_by_key = await _linked_issues_concurrent(session, [o.get("key") for o in outcomes])
+            for _linked_list in outcome_linked_by_key.values():
+                issue_summaries.update({i.get("key"): i.get("summary") for i in _linked_list})
+            outcome_field_map = _effective_field_map("outcome")
 
             for outcome in outcomes:
                 outcome_key = outcome.get("key")
@@ -799,8 +833,11 @@ async def _run_full_scan(project_key=None, board_id=None):
 
                 raw = outcome_raw_by_key.get(outcome_key)
                 if raw is not None:
-                    outcome_findings = field_rules.check_outcome_fields(raw.get("fields", {}), outcome_status)
+                    outcome_findings = field_rules.check_outcome_fields(raw.get("fields", {}), outcome_status, field_map=outcome_field_map)
                     field_findings_by_entity.append(("outcome", outcome_key, outcome_status, outcome_findings))
+                    scrum_team = field_rules._value(raw.get("fields", {}), SCRUM_TEAM_FIELD_ID)
+                    if scrum_team:
+                        issue_scrum_teams[outcome_key] = scrum_team
 
                 outcome_linked = outcome_linked_by_key.get(outcome_key, [])
 
@@ -818,11 +855,31 @@ async def _run_full_scan(project_key=None, board_id=None):
                         "severity": verdict["severity"], "score": verdict["score"],
                     })
 
+                # Outcome <- Epic bottleneck check: an Epic's parent is
+                # an Outcome (additive to the Story<->Outcome relationship
+                # above — a Story linking to an Outcome and an Epic's
+                # parent being that same Outcome are two separate real
+                # relationships, not alternatives to each other).
+                epic_entries = outcome_to_epic_entries.get(outcome_key, [])
+                epic_verdict = compliance_rules.evaluate_outcome_epic(outcome_status, epic_entries)
+                if epic_verdict["bottleneck_epic_key"] is not None:
+                    outcome_epic_results.append({
+                        "pair_type": "outcome_epic",
+                        "cr_key": epic_verdict["bottleneck_epic_key"], "cr_status": epic_verdict["bottleneck_epic_status"],
+                        "story_key": outcome_key, "story_status": outcome_status,
+                        "compliant": epic_verdict["compliant"], "reason": epic_verdict["reason"],
+                        "severity": epic_verdict["severity"], "score": epic_verdict["score"],
+                    })
+
     run_id = compliance_db.save_run(results)
     if epic_results:
         compliance_db.save_additional_checks(run_id, epic_results, "epic_cr")
     if outcome_results:
         compliance_db.save_additional_checks(run_id, outcome_results, "story_outcome")
+    if outcome_epic_results:
+        compliance_db.save_additional_checks(run_id, outcome_epic_results, "outcome_epic")
+    compliance_db.save_issue_summaries(issue_summaries)
+    compliance_db.save_issue_scrum_teams(issue_scrum_teams)
     for entity_type, entity_key, entity_status, findings in field_findings_by_entity:
         compliance_db.save_field_findings(field_run_id, entity_type, entity_key, entity_status, findings)
 
@@ -843,12 +900,52 @@ async def _run_full_scan(project_key=None, board_id=None):
     }
 
 
+@app.route("/api/issues/<issue_key>/description", methods=["GET"])
+def get_issue_description(issue_key):
+    """Fetches an issue's full title and description live (not from the
+    stored scan data) — used by the title-click popup. Description isn't
+    captured during the bulk scan (would bloat the DB for something only
+    needed occasionally), so this is a light on-demand fetch instead."""
+    try:
+        raw = jira_rest.get_issue_raw(issue_key)
+    except Exception as e:
+        return jsonify({"error": f"Could not fetch issue: {e}"}), 500
+    fields = raw.get("fields", {})
+    return jsonify({
+        "issue_key": issue_key,
+        "summary": fields.get("summary"),
+        "description": field_rules._description_text(fields.get("description")),
+    })
+
+
+@app.route("/api/issues/summaries", methods=["GET"])
+def get_issue_summaries():
+    keys_param = request.args.get("keys")
+    keys = [k.strip() for k in keys_param.split(",") if k.strip()] if keys_param else None
+    return jsonify(compliance_db.get_issue_summaries(keys))
+
+
+@app.route("/api/issues/scrum-teams", methods=["GET"])
+def get_issue_scrum_teams():
+    keys_param = request.args.get("keys")
+    keys = [k.strip() for k in keys_param.split(",") if k.strip()] if keys_param else None
+    return jsonify(compliance_db.get_issue_scrum_teams(keys))
+
+
 @app.route("/api/pairs/epic-cr", methods=["GET"])
 def get_epic_cr_findings():
     run_id = compliance_db.latest_run_id()
     if not run_id:
         return jsonify([])
     return jsonify(compliance_db.get_pair_findings(run_id, "epic_cr"))
+
+
+@app.route("/api/pairs/outcome-epic", methods=["GET"])
+def get_outcome_epic_findings():
+    run_id = compliance_db.latest_run_id()
+    if not run_id:
+        return jsonify([])
+    return jsonify(compliance_db.get_pair_findings(run_id, "outcome_epic"))
 
 
 @app.route("/api/pairs/story-outcome", methods=["GET"])
@@ -880,9 +977,9 @@ def check_single_issue_fields():
 
     status_name = ((raw.get("fields", {}).get("status") or {}).get("name"))
     if entity_type == "cr":
-        findings = field_rules.check_cr_fields(raw.get("fields", {}), status_name)
+        findings = field_rules.check_cr_fields(raw.get("fields", {}), status_name, field_map=_effective_field_map("cr"))
     else:
-        findings = field_rules.check_outcome_fields(raw.get("fields", {}), status_name)
+        findings = field_rules.check_outcome_fields(raw.get("fields", {}), status_name, field_map=_effective_field_map("outcome"))
 
     return jsonify({"issue_key": issue_key, "status": status_name, "findings": findings})
 
@@ -900,6 +997,14 @@ _CHECK_FUNCS = {
 }
 
 
+def _effective_field_map(entity_type):
+    """Currently just the hardcoded defaults — AI-assisted field mapping
+    discovery was built but not deployed, so this is a plain passthrough
+    for now, kept as a single function so re-enabling that feature later
+    only means changing this one place, not every call site again."""
+    return _FIELD_MAPS[entity_type][0]
+
+
 @app.route("/api/entities/<entity_type>/<entity_key>/fields", methods=["GET"])
 def get_entity_current_fields(entity_type, entity_key):
     """Returns EVERY field for this entity type with its current value —
@@ -907,7 +1012,8 @@ def get_entity_current_fields(entity_type, entity_key):
     show every field as editable, pre-filled where a value already exists."""
     if entity_type not in _FIELD_MAPS:
         return jsonify({"error": "entity_type must be cr, epic, or outcome"}), 400
-    field_ids, labels, types = _FIELD_MAPS[entity_type]
+    _, labels, types = _FIELD_MAPS[entity_type]
+    field_ids = _effective_field_map(entity_type)
 
     try:
         raw = jira_rest.get_issue_raw(entity_key)
@@ -977,7 +1083,8 @@ def update_field():
     if entity_type not in _FIELD_MAPS:
         return jsonify({"error": "entity_type must be cr, epic, or outcome"}), 400
 
-    field_ids, labels, types = _FIELD_MAPS[entity_type]
+    _, labels, types = _FIELD_MAPS[entity_type]
+    field_ids = _effective_field_map(entity_type)
     if field_key not in field_ids:
         return jsonify({"error": f"Unknown field_key '{field_key}' for {entity_type}"}), 400
 
@@ -1004,7 +1111,7 @@ def update_field():
             raw = jira_rest.get_issue_raw(issue_key)
             fresh_status = (raw.get("fields", {}).get("status") or {}).get("name")
             check_func = _CHECK_FUNCS[entity_type]
-            fresh_findings = check_func(raw.get("fields", {}), fresh_status)
+            fresh_findings = check_func(raw.get("fields", {}), fresh_status, field_map=_effective_field_map(entity_type))
             compliance_db.replace_field_findings_for_entity(run_id, entity_type, issue_key, fresh_status, fresh_findings)
     except Exception as e:
         print(f"[update_field] wrote to Jira OK but immediate re-check failed for {issue_key}: {e}")

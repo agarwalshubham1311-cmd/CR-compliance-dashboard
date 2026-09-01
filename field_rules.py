@@ -9,17 +9,17 @@ import datetime
 import re
 
 CR_FIELDS = {
-    "epic_link": "customfield_10006",
-    "complexity": "customfield_15904",
-    "funded_by": "customfield_20702",
-    "baseline_target_delivery_date": "customfield_15801",
+    "epic_link": "customfield_10014",
+    "complexity": "customfield_10109",
+    "funded_by": "customfield_10106",
+    "baseline_target_delivery_date": "customfield_10110",
     "baseline_prp_date": "customfield_10108",
-    "actual_prp_start_date": "customfield_10107", #not found
-    "prp_status": "customfield_10111",  #not found
-    "release_through": "customfield_26025",
-    "target_delivery_date": "customfield_18103",
-    "reason_for_delay": "customfield_19600",
-    "blocked_by_dependency": "customfield_10150", #not found
+    "actual_prp_start_date": "customfield_10107",
+    "prp_status": "customfield_10111",
+    "release_through": "customfield_10113",
+    "target_delivery_date": "customfield_10112",
+    "reason_for_delay": "customfield_10149",
+    "blocked_by_dependency": "customfield_10150",
 }
 
 OUTCOME_FIELDS = {
@@ -31,12 +31,12 @@ OUTCOME_FIELDS = {
 
 EPIC_FIELDS = {
     "due_date": "duedate",
-    "target_delivery_date": "customfield_18103",  # Epic's OWN field — distinct from CR/Outcome's customfield_10112
+    "target_delivery_date": "customfield_10184",  # Epic's OWN field — distinct from CR/Outcome's customfield_10112
     "description": "description",
     "labels": "labels",
     "priority": "priority",
-    "pi": "customfield_21699",
-    "delivery_data_confidence": "customfield_21663",
+    "pi": "customfield_10183",
+    "delivery_data_confidence": "customfield_10185",
 }
 
 # Human-readable labels for each field key, used by the /api/entities/*
@@ -181,8 +181,11 @@ def _parse_date(value):
         return None
 
 
-def check_cr_fields(fields, status_name):
-    """Returns a list of finding dicts: {check, field, severity, message}."""
+def check_cr_fields(fields, status_name, field_map=None):
+    """Returns a list of finding dicts: {check, field, severity, message}.
+    field_map overrides CR_FIELDS if given — used to apply human-confirmed
+    AI-discovered field mappings without changing the hardcoded defaults."""
+    fm = field_map or CR_FIELDS
     findings = []
     status_norm = (status_name or "").strip().upper()
     is_terminal = status_norm in TERMINAL_STATUSES_CR
@@ -200,13 +203,13 @@ def check_cr_fields(fields, status_name):
         ("target_delivery_date", "Target Delivery Date"),
     ]
     for key, label in required:
-        if _value(fields, CR_FIELDS[key]) is None:
+        if _value(fields, fm[key]) is None:
             findings.append({"check": "missing_field", "field": label, "severity": "Low",
                               "message": f"{label} is not set"})
 
-    baseline = _value(fields, CR_FIELDS["baseline_target_delivery_date"])
-    target = _value(fields, CR_FIELDS["target_delivery_date"])
-    reason = _value(fields, CR_FIELDS["reason_for_delay"])
+    baseline = _value(fields, fm["baseline_target_delivery_date"])
+    target = _value(fields, fm["target_delivery_date"])
+    reason = _value(fields, fm["reason_for_delay"])
 
     if baseline and target and baseline != target and not reason:
         findings.append({"check": "delay_reason_missing", "field": "Reason for Delay", "severity": "Medium",
@@ -220,7 +223,7 @@ def check_cr_fields(fields, status_name):
         findings.append({"check": "overdue", "field": "Target Delivery Date", "severity": "High",
                           "message": f"Target delivery date ({target}) is in the past"})
 
-    blocked_by = _value(fields, CR_FIELDS["blocked_by_dependency"])
+    blocked_by = _value(fields, fm["blocked_by_dependency"])
     if is_blocked and not blocked_by:
         findings.append({"check": "blocked_reason_missing", "field": "Blocked by/Dependency", "severity": "Medium",
                           "message": "Status is Blocked/On Hold but Blocked by/Dependency is not set"})
@@ -237,40 +240,41 @@ def _description_text(raw):
     return _adf_to_text(raw)
 
 
-def check_epic_fields(fields, status_name):
+def check_epic_fields(fields, status_name, field_map=None):
+    fm = field_map or EPIC_FIELDS
     findings = []
 
-    due_date = _value(fields, EPIC_FIELDS["due_date"])
+    due_date = _value(fields, fm["due_date"])
     if due_date is None:
         findings.append({"check": "missing_field", "field": "Due Date", "severity": "Low",
                           "message": "Due Date is not set"})
 
-    target = _value(fields, EPIC_FIELDS["target_delivery_date"])
+    target = _value(fields, fm["target_delivery_date"])
     if target is None:
         findings.append({"check": "missing_field", "field": "Target Delivery Date", "severity": "Low",
                           "message": "Target Delivery Date is not set"})
 
-    desc_text = _description_text(fields.get(EPIC_FIELDS["description"]))
+    desc_text = _description_text(fields.get(fm["description"]))
     if not desc_text:
         findings.append({"check": "missing_field", "field": "Description", "severity": "Low",
                           "message": "Description is empty"})
 
-    labels = fields.get(EPIC_FIELDS["labels"])
+    labels = fields.get(fm["labels"])
     if not labels:
         findings.append({"check": "missing_field", "field": "Labels", "severity": "Low",
                           "message": "No labels set"})
 
-    priority = _value(fields, EPIC_FIELDS["priority"])
+    priority = _value(fields, fm["priority"])
     if priority is None:
         findings.append({"check": "missing_field", "field": "Priority", "severity": "Low",
                           "message": "Priority is not set"})
 
-    pi = _value(fields, EPIC_FIELDS["pi"])
+    pi = _value(fields, fm["pi"])
     if pi is None:
         findings.append({"check": "missing_field", "field": "PI", "severity": "Low",
                           "message": "PI is not set"})
 
-    delivery_confidence = _value(fields, EPIC_FIELDS["delivery_data_confidence"])
+    delivery_confidence = _value(fields, fm["delivery_data_confidence"])
     if delivery_confidence is None:
         findings.append({"check": "missing_field", "field": "Delivery Data Confidence", "severity": "Low",
                           "message": "Delivery Data Confidence is not set"})
@@ -278,7 +282,8 @@ def check_epic_fields(fields, status_name):
     return findings
 
 
-def check_outcome_fields(fields, status_name):
+def check_outcome_fields(fields, status_name, field_map=None):
+    fm = field_map or OUTCOME_FIELDS
     findings = []
     status_norm = (status_name or "").strip().upper()
     is_terminal = status_norm in TERMINAL_STATUSES_OUTCOME
@@ -290,20 +295,34 @@ def check_outcome_fields(fields, status_name):
         ("go_live_date", "Go Live Date"),
     ]
     for key, label in required:
-        if _value(fields, OUTCOME_FIELDS[key]) is None:
+        if _value(fields, fm[key]) is None:
             findings.append({"check": "missing_field", "field": label, "severity": "Low",
                               "message": f"{label} is not set"})
 
-    target = _value(fields, OUTCOME_FIELDS["target_delivery_date"])
+    target = _value(fields, fm["target_delivery_date"])
     target_date = _parse_date(target)
     if target_date and not is_terminal and target_date < datetime.date.today():
         findings.append({"check": "overdue", "field": "Target Delivery Date", "severity": "High",
                           "message": f"Target delivery date ({target}) is in the past"})
 
-    go_live = _value(fields, OUTCOME_FIELDS["go_live_date"])
+    go_live = _value(fields, fm["go_live_date"])
     go_live_date = _parse_date(go_live)
     if go_live_date and not is_terminal and go_live_date < datetime.date.today():
         findings.append({"check": "go_live_overdue", "field": "Go Live Date", "severity": "High",
                           "message": f"Go Live date ({go_live}) is in the past"})
 
     return findings
+
+
+def merge_field_map(base_map, confirmed_overrides):
+    """base_map: CR_FIELDS/EPIC_FIELDS/OUTCOME_FIELDS.
+    confirmed_overrides: list of {field_key, jira_field_id} dicts from
+    db.get_confirmed_field_mappings(entity_type).
+    Only replaces IDs for keys base_map already defines — never adds a
+    brand new unknown key, so the set of fields this app checks stays
+    fixed; only WHICH Jira field ID backs each one can be corrected."""
+    merged = dict(base_map)
+    for o in confirmed_overrides:
+        if o["field_key"] in merged:
+            merged[o["field_key"]] = o["jira_field_id"]
+    return merged

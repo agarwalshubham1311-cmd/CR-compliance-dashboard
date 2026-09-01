@@ -41,11 +41,20 @@ const TABS = {
     hasActions: true, hasResolve: true, dependentSide: 'left',
   },
   outcome: {
-    label: 'Outcome',
+    label: 'Outcome', outcomeCombined: true,
     columns: ['Story', 'Story status', 'Outcome', 'Outcome status', 'Reason', 'Severity'],
     getRows: d => ({ leftKey: d.cr_key, leftStatus: d.cr_status, rightKey: d.story_key, rightStatus: d.story_status, reason: d.reason, severity: d.severity, score: d.score }),
     hasActions: true, dependentSide: 'right',
   },
+}
+
+// Outcome <- Epic relationship (an Epic's parent is an Outcome) — not part
+// of TABS since it's a second phase-table on the Outcome tab, not a tab
+// of its own. Epic is the dependent side (needs to act if behind).
+const OUTCOME_EPIC_CFG = {
+  columns: ['Epic', 'Epic status', 'Outcome', 'Outcome status', 'Reason', 'Severity'],
+  getRows: d => ({ leftKey: d.cr_key, leftStatus: d.cr_status, rightKey: d.story_key, rightStatus: d.story_status, reason: d.reason, severity: d.severity, score: d.score }),
+  hasActions: true, dependentSide: 'left',
 }
 
 async function fetchJSON(url, opts) {
@@ -56,14 +65,19 @@ async function fetchJSON(url, opts) {
 export default function App() {
   const [currentTab, setCurrentTab] = useState('epic')
   const [jiraBase, setJiraBase] = useState('')
-  const [data, setData] = useState({ epic: [], epicFields: [], cr: [], story: [], outcome: [], outcomeFields: [] })
+  const [data, setData] = useState({ epic: [], epicFields: [], cr: [], story: [], outcome: [], outcomeFields: [], outcomeEpic: [] })
+  const [summaries, setSummaries] = useState({})
+  const [scrumTeams, setScrumTeams] = useState({})
+  const [scrumTeamFilter, setScrumTeamFilter] = useState('all')
   const [status, setStatus] = useState('')
   const [expandedKey, setExpandedKey] = useState(null)
   const [epicFieldsExpandedKey, setEpicFieldsExpandedKey] = useState(null)
+  const [outcomeFieldsExpandedKey, setOutcomeFieldsExpandedKey] = useState(null)
   const [reasonFilter, setReasonFilter] = useState('all')
   const [sevFilter, setSevFilter] = useState('all')
   const [sortAsc, setSortAsc] = useState(false)
   const [draft, setDraft] = useState(null) // { forKey, text, statusMsg }
+  const [titleModal, setTitleModal] = useState(null) // { key, summary, description, loading, error }
   const [statusChange, setStatusChange] = useState(null) // { forKey, transitions, selected, msg }
   const [projects, setProjects] = useState([])
   const [boards, setBoards] = useState([])
@@ -73,22 +87,28 @@ export default function App() {
   const fieldCache = useRef({})
 
   const loadAll = useCallback(async () => {
-    const [summary, epicPairs, outcomePairs, crFindings, epicFindings, outcomeFindings] = await Promise.all([
+    const [summary, epicPairs, outcomePairs, outcomeEpicPairs, crFindings, epicFindings, outcomeFindings, summaries, scrumTeams] = await Promise.all([
       fetchJSON('/api/dashboard/summary'),
       fetchJSON('/api/pairs/epic-cr'),
       fetchJSON('/api/pairs/story-outcome'),
+      fetchJSON('/api/pairs/outcome-epic'),
       fetchJSON('/api/fields/findings?entity_type=cr'),
       fetchJSON('/api/fields/findings?entity_type=epic'),
       fetchJSON('/api/fields/findings?entity_type=outcome'),
+      fetchJSON('/api/issues/summaries'),
+      fetchJSON('/api/issues/scrum-teams'),
     ])
     setData({
       story: summary.active || [],
       epic: Array.isArray(epicPairs) ? epicPairs : [],
       epicFields: Array.isArray(epicFindings) ? epicFindings : [],
       outcome: Array.isArray(outcomePairs) ? outcomePairs : [],
+      outcomeEpic: Array.isArray(outcomeEpicPairs) ? outcomeEpicPairs : [],
       cr: Array.isArray(crFindings) ? crFindings : [],
       outcomeFields: Array.isArray(outcomeFindings) ? outcomeFindings : [],
     })
+    setSummaries(summaries && typeof summaries === 'object' ? summaries : {})
+    setScrumTeams(scrumTeams && typeof scrumTeams === 'object' ? scrumTeams : {})
     setStatus(summary.checked_at ? 'Last scan: ' + new Date(summary.checked_at * 1000).toLocaleString() : 'No scan yet')
   }, [])
 
@@ -164,6 +184,18 @@ export default function App() {
     loadAll()
   }
 
+  async function openTitleModal(key, fallbackSummary) {
+    setTitleModal({ key, summary: fallbackSummary, description: null, loading: true, error: null })
+    const result = await fetchJSON(`/api/issues/${key}/description`)
+    if (result.error) {
+      setTitleModal(m => (m && m.key === key) ? { ...m, loading: false, error: result.error } : m)
+    } else {
+      setTitleModal(m => (m && m.key === key)
+        ? { ...m, loading: false, summary: result.summary || fallbackSummary, description: result.description }
+        : m)
+    }
+  }
+
   async function draftPhaseComment(targetKey, targetStatus, otherKey, otherStatus, reason, severity) {
     setDraft({ forKey: targetKey, text: 'Generating draft with local LLM...', statusMsg: '' })
     const result = await fetchJSON('/api/ai/draft-comment', {
@@ -232,6 +264,7 @@ export default function App() {
     setExpandedKey(null)
     setReasonFilter('all')
     setSevFilter('all')
+    setScrumTeamFilter('all')
   }
 
   const cfg = TABS[currentTab]
@@ -286,6 +319,12 @@ export default function App() {
           <option value="all">All severities</option>
           <option>Critical</option><option>High</option><option>Medium</option><option>Low</option>
         </select>
+        <select value={scrumTeamFilter} onChange={e => setScrumTeamFilter(e.target.value)}>
+          <option value="all">All scrum teams</option>
+          {[...new Set(Object.values(scrumTeams).filter(Boolean))].sort().map(team => (
+            <option key={team} value={team}>{team}</option>
+          ))}
+        </select>
       </div>
 
       {cfg.combined && (
@@ -294,16 +333,16 @@ export default function App() {
           sortAsc={sortAsc} setSortAsc={setSortAsc} expandedKey={expandedKey} setExpandedKey={setExpandedKey}
           onResolve={resolveRow} onDraft={draftPhaseComment} onStatusChange={openStatusBox}
           statusChange={statusChange} onApplyStatus={applyStatusChange} onSelectTransition={selectTransition} onCloseStatus={() => setStatusChange(null)}
-          title="Phase mismatches" jiraBase={jiraBase}
+          title="Phase mismatches" jiraBase={jiraBase} summaries={summaries} scrumTeams={scrumTeams} scrumTeamFilter={scrumTeamFilter} onTitleClick={openTitleModal}
         />
       )}
-      {!cfg.combined && !cfg.fieldTab && (
+      {!cfg.combined && !cfg.fieldTab && !cfg.outcomeCombined && (
         <PhaseTable
           cfg={cfg} rows={data[currentTab]} reasonFilter={reasonFilter} sevFilter={sevFilter}
           sortAsc={sortAsc} setSortAsc={setSortAsc} expandedKey={expandedKey} setExpandedKey={setExpandedKey}
           onResolve={resolveRow} onDraft={draftPhaseComment} onStatusChange={openStatusBox}
           statusChange={statusChange} onApplyStatus={applyStatusChange} onSelectTransition={selectTransition} onCloseStatus={() => setStatusChange(null)}
-          title={'Non-compliant ' + currentTab + 's'} jiraBase={jiraBase}
+          title={'Non-compliant ' + currentTab + 's'} jiraBase={jiraBase} summaries={summaries} scrumTeams={scrumTeams} scrumTeamFilter={scrumTeamFilter} onTitleClick={openTitleModal}
         />
       )}
       {cfg.fieldTab && (
@@ -311,7 +350,7 @@ export default function App() {
           findings={data.cr} reasonFilter={reasonFilter} sevFilter={sevFilter}
           entityType="cr" expandedKey={expandedKey} setExpandedKey={setExpandedKey}
           onDraft={draftFieldComment} fieldCache={fieldCache} onSaved={loadAll}
-          title="Non-compliant CRs" jiraBase={jiraBase}
+          title="Non-compliant CRs" jiraBase={jiraBase} summaries={summaries} scrumTeams={scrumTeams} scrumTeamFilter={scrumTeamFilter} onTitleClick={openTitleModal}
         />
       )}
       {cfg.combined && (
@@ -319,8 +358,32 @@ export default function App() {
           findings={data.epicFields} reasonFilter="all" sevFilter="all"
           entityType="epic" expandedKey={epicFieldsExpandedKey} setExpandedKey={setEpicFieldsExpandedKey}
           onDraft={draftFieldComment} fieldCache={fieldCache} onSaved={loadAll}
-          title="Field issues" jiraBase={jiraBase}
+          title="Field issues" jiraBase={jiraBase} summaries={summaries} scrumTeams={scrumTeams} scrumTeamFilter={scrumTeamFilter} onTitleClick={openTitleModal}
         />
+      )}
+      {cfg.outcomeCombined && (
+        <>
+          <PhaseTable
+            cfg={OUTCOME_EPIC_CFG} rows={data.outcomeEpic} reasonFilter={reasonFilter} sevFilter={sevFilter}
+            sortAsc={sortAsc} setSortAsc={setSortAsc} expandedKey={expandedKey} setExpandedKey={setExpandedKey}
+            onResolve={resolveRow} onDraft={draftPhaseComment} onStatusChange={openStatusBox}
+            statusChange={statusChange} onApplyStatus={applyStatusChange} onSelectTransition={selectTransition} onCloseStatus={() => setStatusChange(null)}
+            title="Epic phase mismatches" jiraBase={jiraBase} summaries={summaries} scrumTeams={scrumTeams} scrumTeamFilter={scrumTeamFilter} onTitleClick={openTitleModal}
+          />
+          <PhaseTable
+            cfg={cfg} rows={data.outcome} reasonFilter={reasonFilter} sevFilter={sevFilter}
+            sortAsc={sortAsc} setSortAsc={setSortAsc} expandedKey={expandedKey} setExpandedKey={setExpandedKey}
+            onResolve={resolveRow} onDraft={draftPhaseComment} onStatusChange={openStatusBox}
+            statusChange={statusChange} onApplyStatus={applyStatusChange} onSelectTransition={selectTransition} onCloseStatus={() => setStatusChange(null)}
+            title="Story phase mismatches" jiraBase={jiraBase} summaries={summaries} scrumTeams={scrumTeams} scrumTeamFilter={scrumTeamFilter} onTitleClick={openTitleModal}
+          />
+          <FieldTable
+            findings={data.outcomeFields} reasonFilter="all" sevFilter="all"
+            entityType="outcome" expandedKey={outcomeFieldsExpandedKey} setExpandedKey={setOutcomeFieldsExpandedKey}
+            onDraft={draftFieldComment} fieldCache={fieldCache} onSaved={loadAll}
+            title="Field issues" jiraBase={jiraBase} summaries={summaries} scrumTeams={scrumTeams} scrumTeamFilter={scrumTeamFilter} onTitleClick={openTitleModal}
+          />
+        </>
       )}
 
       {draft && (
@@ -339,6 +402,25 @@ export default function App() {
               <button onClick={() => setDraft(null)}>Discard</button>
             </div>
             <p id="draftStatus">{draft.statusMsg}</p>
+          </div>
+        </div>
+      )}
+
+      {titleModal && (
+        <div className="modal-overlay" onClick={() => setTitleModal(null)}>
+          <div className="modal-card" onClick={e => e.stopPropagation()}>
+            <div className="modal-header">
+              <p style={{ fontSize: 14, fontWeight: 500, margin: 0 }}>
+                <span style={{ color: '#185fa5' }}>{titleModal.key}</span>
+              </p>
+              <button className="modal-close" onClick={() => setTitleModal(null)} aria-label="Close">✕</button>
+            </div>
+            <p style={{ fontSize: 15, fontWeight: 500, margin: '10px 0 4px' }}>{titleModal.summary || '(no title)'}</p>
+            <div style={{ fontSize: 13, color: '#555', marginTop: 10, whiteSpace: 'pre-wrap', maxHeight: 300, overflowY: 'auto' }}>
+              {titleModal.loading && 'Loading description...'}
+              {titleModal.error && <span style={{ color: '#c0392b' }}>Error: {titleModal.error}</span>}
+              {!titleModal.loading && !titleModal.error && (titleModal.description || <span style={{ color: '#888' }}>No description set.</span>)}
+            </div>
           </div>
         </div>
       )}
@@ -430,9 +512,10 @@ function Charts({ tab, data }) {
   )
 }
 
-function PhaseTable({ cfg, rows, reasonFilter, sevFilter, sortAsc, setSortAsc, expandedKey, setExpandedKey, onResolve, onDraft, onStatusChange, statusChange, onApplyStatus, onSelectTransition, onCloseStatus, title, jiraBase }) {
+function PhaseTable({ cfg, rows, reasonFilter, sevFilter, sortAsc, setSortAsc, expandedKey, setExpandedKey, onResolve, onDraft, onStatusChange, statusChange, onApplyStatus, onSelectTransition, onCloseStatus, title, jiraBase, summaries = {}, scrumTeams = {}, scrumTeamFilter = 'all', onTitleClick }) {
   let filtered = rows.map(cfg.getRows)
     .filter(r => (reasonFilter === 'all' || r.reason === reasonFilter) && (sevFilter === 'all' || r.severity === sevFilter))
+    .filter(r => scrumTeamFilter === 'all' || scrumTeams[r.leftKey] === scrumTeamFilter || scrumTeams[r.rightKey] === scrumTeamFilter)
     .sort((a, b) => sortAsc ? (a.score || 0) - (b.score || 0) : (b.score || 0) - (a.score || 0))
 
   const isTargetLeft = cfg.dependentSide !== 'right'
@@ -464,9 +547,15 @@ function PhaseTable({ cfg, rows, reasonFilter, sevFilter, sortAsc, setSortAsc, e
             return (
               <React.Fragment key={d.leftKey + d.rightKey}>
                 <tr className="data-row" onClick={() => setExpandedKey(isOpen ? null : d.leftKey)}>
-                  <td><a className="key-link" href={jiraBase + d.leftKey} target="_blank" rel="noreferrer" onClick={e => e.stopPropagation()}>{d.leftKey}</a></td>
+                  <td>
+                    <a className="key-link" href={jiraBase + d.leftKey} target="_blank" rel="noreferrer" onClick={e => e.stopPropagation()}>{d.leftKey}</a>
+                    {summaries[d.leftKey] && <div className="issue-title" onClick={e => { e.stopPropagation(); onTitleClick(d.leftKey, summaries[d.leftKey]) }}>{summaries[d.leftKey]}</div>}
+                  </td>
                   <td>{d.leftStatus}</td>
-                  <td><a className="key-link" href={jiraBase + d.rightKey} target="_blank" rel="noreferrer" onClick={e => e.stopPropagation()}>{d.rightKey}</a></td>
+                  <td>
+                    <a className="key-link" href={jiraBase + d.rightKey} target="_blank" rel="noreferrer" onClick={e => e.stopPropagation()}>{d.rightKey}</a>
+                    {summaries[d.rightKey] && <div className="issue-title" onClick={e => { e.stopPropagation(); onTitleClick(d.rightKey, summaries[d.rightKey]) }}>{summaries[d.rightKey]}</div>}
+                  </td>
                   <td>{d.rightStatus}</td>
                   <td><ReasonBadge reason={d.reason} /></td>
                   <td><span className={'badge badge-' + d.severity}>{d.severity}</span></td>
@@ -531,8 +620,10 @@ function PhaseTable({ cfg, rows, reasonFilter, sevFilter, sortAsc, setSortAsc, e
   )
 }
 
-function FieldTable({ findings, reasonFilter, sevFilter, entityType, expandedKey, setExpandedKey, onDraft, fieldCache, onSaved, title, jiraBase }) {
-  const filtered = findings.filter(f => (reasonFilter === 'all' || f.field === reasonFilter) && (sevFilter === 'all' || f.severity === sevFilter))
+function FieldTable({ findings, reasonFilter, sevFilter, entityType, expandedKey, setExpandedKey, onDraft, fieldCache, onSaved, title, jiraBase, summaries = {}, scrumTeams = {}, scrumTeamFilter = 'all', onTitleClick }) {
+  const filtered = findings
+    .filter(f => (reasonFilter === 'all' || f.field === reasonFilter) && (sevFilter === 'all' || f.severity === sevFilter))
+    .filter(f => scrumTeamFilter === 'all' || scrumTeams[f.entity_key] === scrumTeamFilter)
   const rank = { Critical: 3, High: 2, Medium: 1, Low: 0 }
   const groups = {}
   filtered.forEach(f => {
@@ -542,13 +633,14 @@ function FieldTable({ findings, reasonFilter, sevFilter, entityType, expandedKey
   })
   const sevLabel = { 3: 'Critical', 2: 'High', 1: 'Medium', 0: 'Low' }
   const groupList = Object.values(groups).sort((a, b) => b.maxRank - a.maxRank)
+  const entityLabel = { epic: 'Epic', outcome: 'Outcome' }[entityType] || 'CR'
 
   return (
     <div className="table-wrap">
       <div className="table-header"><p>{title}</p></div>
       <table>
         <colgroup><col style={{ width: '16%' }} /><col style={{ width: '18%' }} /><col style={{ width: '12%' }} /><col style={{ width: '26%' }} /><col style={{ width: '20%' }} /><col style={{ width: '8%' }} /></colgroup>
-        <thead><tr><th>{entityType === 'epic' ? 'Epic' : 'CR'}</th><th>Status</th><th>Severity</th><th>Issues</th><th>Actions</th><th></th></tr></thead>
+        <thead><tr><th>{entityLabel}</th><th>Status</th><th>Severity</th><th>Issues</th><th>Actions</th><th></th></tr></thead>
         <tbody>
           {groupList.length === 0 && <tr><td colSpan={6} className="empty">No findings.</td></tr>}
           {groupList.map(g => {
@@ -556,7 +648,10 @@ function FieldTable({ findings, reasonFilter, sevFilter, entityType, expandedKey
             return (
               <React.Fragment key={g.key}>
                 <tr className="data-row" onClick={() => setExpandedKey(isOpen ? null : g.key)}>
-                  <td><a className="key-link" href={jiraBase + g.key} target="_blank" rel="noreferrer" onClick={e => e.stopPropagation()}>{g.key}</a></td>
+                  <td>
+                    <a className="key-link" href={jiraBase + g.key} target="_blank" rel="noreferrer" onClick={e => e.stopPropagation()}>{g.key}</a>
+                    {summaries[g.key] && <div className="issue-title" onClick={e => { e.stopPropagation(); onTitleClick(g.key, summaries[g.key]) }}>{summaries[g.key]}</div>}
+                  </td>
                   <td>{g.status || '-'}</td>
                   <td><span className={'badge badge-' + sevLabel[g.maxRank]}>{sevLabel[g.maxRank]}</span></td>
                   <td>{g.findings.length} issue{g.findings.length > 1 ? 's' : ''}</td>

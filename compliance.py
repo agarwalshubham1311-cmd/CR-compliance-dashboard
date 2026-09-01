@@ -1,6 +1,6 @@
 """
-Compliance rules derived from the ACC workflow diagrams (Change Request,
-Story, Epic, Outcome).
+Compliance rules for aligning Change Request, Story, Epic, and Outcome
+workflow phases.
 
 Core idea: every status resolves onto a shared 0-7 canonical phase scale.
 A "driver" entity has one status = one phase (CR, or Story acting as a
@@ -18,57 +18,40 @@ Directionality in this system:
 
 Blocked/Withdrawn (and On Hold, aliased to Blocked) are cross-cutting
 states handled before any phase comparison.
+
+PHASES, OUTCOME_PHASES, and the seed aliases are hardcoded below rather
+than loaded from a config file — this app is deployed against a single
+Jira instance, so a config-file layer wasn't adopted.
 """
 
 PHASES = [
-    {  # phase 0 - pre-agreement / not started
-        "cr": ["NEW REQUEST", "IMPACT ASSESSMENT REVIEW/APPROVAL", "IMPACT ASSESSMENT APPROVED",
-               "IMPACT ASSESSMENT IN PROGRESS", "BUILD REVIEW / APPROVAL", "CR AGREED"],
-        "story": ["BACKLOG"],
-    },
-    {  # phase 1
-        "cr": ["STORIES CREATED"],
-        "story": ["BACKLOG", "IN ANALYSIS"],
-    },
-    {  # phase 2
-        "cr": ["IN DEVELOPMENT"],
-        "story": ["IN ANALYSIS", "ANALYSIS DONE", "IN PROGRESS", "DEVELOPMENT DONE", "TEST (DEV)", "DEVTEST COMPLETE"],
-    },
-    {  # phase 3
-        "cr": ["READY FOR MERGE"],
-        "story": ["READY FOR MERGE"],
-    },
-    {  # phase 4
-        "cr": ["IN FEATURE ENV"],
-        "story": ["IN FEATURE ENVIRONMENT", "AUTOSIT"],
-    },
-    {  # phase 5
-        "cr": ["IN PRP"],
-        "story": ["READY FOR PRP TEST", "IN PRP TEST"],
-    },
-    {  # phase 6
-        "cr": ["READY FOR PRODUCTION"],
-        "story": ["READY FOR PROD"],
-    },
-    {  # phase 7
-        "cr": ["DELIVERY COMPLETE"],
-        "story": ["LIVE - FEATURE SWITCHED ON", "LIVE - FEATURE SWITCHED OFF"],
-    },
+    {"cr": ["NEW REQUEST", "IMPACT ASSESSMENT REVIEW/APPROVAL", "IMPACT ASSESSMENT APPROVED",
+            "IMPACT ASSESSMENT IN PROGRESS", "BUILD REVIEW / APPROVAL", "CR AGREED"],
+     "story": ["BACKLOG"]},
+    {"cr": ["STORIES CREATED"],
+     "story": ["BACKLOG", "IN ANALYSIS"]},
+    {"cr": ["IN DEVELOPMENT"],
+     "story": ["IN ANALYSIS", "ANALYSIS DONE", "IN PROGRESS", "DEVELOPMENT DONE", "TEST (DEV)", "DEVTEST COMPLETE"]},
+    {"cr": ["READY FOR MERGE"],
+     "story": ["READY FOR MERGE"]},
+    {"cr": ["IN FEATURE ENV"],
+     "story": ["IN FEATURE ENVIRONMENT", "AUTOSIT"]},
+    {"cr": ["IN PRP"],
+     "story": ["READY FOR PRP TEST", "IN PRP TEST"]},
+    {"cr": ["READY FOR PRODUCTION"],
+     "story": ["READY FOR PROD"]},
+    {"cr": ["DELIVERY COMPLETE"],
+     "story": ["LIVE - FEATURE SWITCHED ON", "LIVE - FEATURE SWITCHED OFF"]},
 ]
 
-# Outcome uses its own vocabulary (different from Story's), mapped onto the
-# same 0-7 canonical scale from its own workflow diagram.
 OUTCOME_PHASES = [
-    {"outcome": ["TO DO", "DISCOVERY BACKLOG"]},                                     # phase 0
-    {"outcome": ["IN ANALYSIS", "IN DESIGN", "IA IN PROGRESS",
-                 "READY FOR DEVELOPMENT", "IN DEVELOPMENT", "INTEGRATION TESTING"]},  # phase 2
-    {"outcome": ["READY FOR DEPLOYMENT"]},                                           # phase 3
-    {"outcome": ["PRIVATE BETA"]},                                                   # phase 4
-    {"outcome": ["PUBLIC BETA"]},                                                    # phase 5
-    {"outcome": ["DONE"]},                                                           # phase 7
+    {"outcome": ["TO DO", "DISCOVERY BACKLOG"]},
+    {"outcome": ["IN ANALYSIS", "IN DESIGN", "IA IN PROGRESS", "READY FOR DEVELOPMENT", "IN DEVELOPMENT", "INTEGRATION TESTING"]},
+    {"outcome": ["READY FOR DEPLOYMENT"]},
+    {"outcome": ["PRIVATE BETA"]},
+    {"outcome": ["PUBLIC BETA"]},
+    {"outcome": ["DONE"]},
 ]
-# Canonical scale index for each entry above (Outcome has fewer distinct
-# stages than CR/Story, so this isn't a dense 0..5 run).
 _OUTCOME_PHASE_INDEX = [0, 2, 3, 4, 5, 7]
 
 CR_STATUS_TO_PHASE = {}
@@ -87,7 +70,8 @@ for i, phase in enumerate(OUTCOME_PHASES):
 
 # Category weights apply regardless of which entity pair is being compared —
 # the reason STRING is built dynamically per pair type below, but severity
-# weighting logic is shared across all pair types.
+# weighting logic is shared across all pair types. This IS code (a scoring
+# policy, not instance-specific data), so it stays here rather than in config.
 CATEGORY_WEIGHT = {
     "dependent_behind": 3,
     "dependent_withdrawn": 3,
@@ -100,20 +84,14 @@ CATEGORY_WEIGHT = {
 
 
 # Aliases map a raw Jira status name to the closest status this compliance
-# table already knows about. Split by type since vocabularies differ —
-# never use one type's alias dict for another type's status.
-#
-# Seeded with mappings confirmed by hand; new entries get added at runtime
-# by ai_classify when the scanner encounters a status it hasn't seen
-# before, so workflow changes don't require code edits.
+# table already knows about. Seeded by hand; new entries get added at
+# runtime by ai_classify when the scanner encounters a status it hasn't
+# seen before (those live in the database, so they survive restarts).
 CR_ALIASES = {}
 STORY_ALIASES = {
     "TO DO": "BACKLOG",
     "DONE": "LIVE - FEATURE SWITCHED ON",
 }
-# Epic reuses the Story phase table (near-identical vocabulary) — this only
-# needs to rename the handful of statuses that differ ("ANALYSIS" vs
-# Story's "IN ANALYSIS"); everything else matches Story's names directly.
 EPIC_ALIASES = {
     "ANALYSIS": "IN ANALYSIS",
 }
@@ -177,11 +155,16 @@ def _driver_phase(status_type, norm_status):
     """Single-phase index for a status acting as the 'driver' side of a
     comparison. CR is naturally single-valued. Story, when driving an
     Outcome, uses the earliest phase its status could represent (the
-    minimum of its compliance-window set) as its intrinsic position."""
+    minimum of its compliance-window set) as its intrinsic position.
+    Outcome, when driving an Epic (Outcome is the Epic's parent), uses
+    the same earliest-phase approach."""
     if status_type == "cr":
         return CR_STATUS_TO_PHASE.get(norm_status)
     if status_type == "story":
         phases = STORY_STATUS_TO_PHASES.get(norm_status)
+        return min(phases) if phases else None
+    if status_type == "outcome":
+        phases = OUTCOME_STATUS_TO_PHASES.get(norm_status)
         return min(phases) if phases else None
     return None
 
@@ -307,4 +290,45 @@ def evaluate_epic(epic_status, cr_entries, age_days=0):
                             driver_label="CR", dependent_label="Epic")
     result["bottleneck_cr_key"] = worst_key
     result["bottleneck_cr_status"] = worst_status
+    return result
+
+
+def evaluate_outcome_epic(outcome_status, epic_entries, age_days=0):
+    """
+    Outcome <- Epic phase alignment, where multiple Epics may link to
+    one Outcome (an Epic's parent is an Outcome). Same bottleneck
+    pattern as evaluate_epic(): the Outcome should track the SLOWEST
+    (lowest-phase) linked Epic.
+
+    epic_entries: list of (epic_key, epic_status) tuples — one per
+    Epic whose parent is this Outcome.
+    Returns the same {compliant, reason, severity, score} shape, plus
+    'bottleneck_epic_key' / 'bottleneck_epic_status' identifying which
+    Epic was the laggard.
+    """
+    if not epic_entries:
+        return {"compliant": True, "reason": None, "severity": None, "score": 0,
+                "bottleneck_epic_key": None, "bottleneck_epic_status": None}
+
+    worst_key, worst_status, worst_phase = None, None, None
+    for epic_key, epic_status in epic_entries:
+        norm = _norm(epic_status, "epic")
+        if norm in ("BLOCKED", "WITHDRAWN"):
+            worst_key, worst_status = epic_key, epic_status
+            break
+        phases = _dependent_phases("epic", norm)
+        phase = min(phases) if phases else None
+        if phase is None:
+            continue
+        if worst_phase is None or phase < worst_phase:
+            worst_phase = phase
+            worst_key, worst_status = epic_key, epic_status
+
+    if worst_status is None:
+        worst_key, worst_status = epic_entries[0]  # all unmapped — let evaluate_pair report it
+
+    result = evaluate_pair(outcome_status, "outcome", worst_status, "epic", age_days,
+                            driver_label="Outcome", dependent_label="Epic")
+    result["bottleneck_epic_key"] = worst_key
+    result["bottleneck_epic_status"] = worst_status
     return result
