@@ -534,13 +534,33 @@ def cr_mismatches():
 # This is what the scheduler calls on a timer, and what /refresh calls
 # on demand.
 # ---------------------------------------------------------------------------
-CR_DISCOVERY_JQL = os.environ.get("CR_DISCOVERY_JQL", 'issuetype = "Change Request"')
+# Single source of truth for both the top-level discovery JQL (below) and
+# filtering linked Stories by their key's project prefix (see
+# _in_allowed_projects) — a CR/Epic/Outcome in ACC/ACBD can link to a
+# Story in a totally different project, which the discovery JQL alone
+# can't filter (linkedIssues() has no project clause), so linked results
+# need their own explicit filter too.
+ALLOWED_PROJECTS = [p.strip().upper() for p in os.environ.get("ALLOWED_PROJECTS", "ACC,ACBD").split(",") if p.strip()]
+_ALLOWED_PROJECTS_JQL = "project in (" + ", ".join(f'"{p}"' for p in ALLOWED_PROJECTS) + ")"
+
+CR_DISCOVERY_JQL = os.environ.get("CR_DISCOVERY_JQL", f'{_ALLOWED_PROJECTS_JQL} AND issuetype = "Change Request"')
 
 # Scrum Team is a filter dimension, not a mandatory field check, so it
 # lives here rather than in field_rules.py's CR/EPIC/OUTCOME_FIELDS.
 SCRUM_TEAM_FIELD_ID = os.environ.get("SCRUM_TEAM_FIELD_ID", "customfield_21304")
-OUTCOME_DISCOVERY_JQL = os.environ.get("OUTCOME_DISCOVERY_JQL", 'issuetype = "Outcome"')
-EPIC_DISCOVERY_JQL = os.environ.get("EPIC_DISCOVERY_JQL", 'issuetype = "Epic"')
+OUTCOME_DISCOVERY_JQL = os.environ.get("OUTCOME_DISCOVERY_JQL", f'{_ALLOWED_PROJECTS_JQL} AND issuetype = "Outcome"')
+EPIC_DISCOVERY_JQL = os.environ.get("EPIC_DISCOVERY_JQL", f'{_ALLOWED_PROJECTS_JQL} AND issuetype = "Epic"')
+
+
+def _in_allowed_projects(issue_key):
+    """Jira issue keys are always PROJECTKEY-NUMBER — this checks that
+    prefix against ALLOWED_PROJECTS. Used to filter linked Stories,
+    since linkedIssues() search has no project clause of its own (a CR
+    in ACC/ACBD can legitimately link to a Story in a different
+    project, which needs to be excluded explicitly here)."""
+    if not issue_key or "-" not in issue_key:
+        return False
+    return issue_key.split("-")[0].upper() in ALLOWED_PROJECTS
 
 # How many direct-REST fetches (jira_rest.get_issue_raw) run concurrently.
 # These are blocking HTTP calls, moved off the event loop via
@@ -743,7 +763,7 @@ async def _run_full_scan(project_key=None, board_id=None):
                     if epic_key:
                         epic_to_cr_entries.setdefault(epic_key, []).append((cr_key, cr_status))
 
-                linked = cr_linked_by_key.get(cr_key, [])
+                linked = [i for i in cr_linked_by_key.get(cr_key, []) if _in_allowed_projects(i.get("key"))]
 
                 for issue in linked:
                     if (issue.get("issue_type") or {}).get("name") != "Story":
@@ -839,7 +859,7 @@ async def _run_full_scan(project_key=None, board_id=None):
                     if scrum_team:
                         issue_scrum_teams[outcome_key] = scrum_team
 
-                outcome_linked = outcome_linked_by_key.get(outcome_key, [])
+                outcome_linked = [i for i in outcome_linked_by_key.get(outcome_key, []) if _in_allowed_projects(i.get("key"))]
 
                 for issue in outcome_linked:
                     if (issue.get("issue_type") or {}).get("name") != "Story":
