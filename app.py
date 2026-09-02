@@ -534,33 +534,42 @@ def cr_mismatches():
 # This is what the scheduler calls on a timer, and what /refresh calls
 # on demand.
 # ---------------------------------------------------------------------------
-# Single source of truth for both the top-level discovery JQL (below) and
-# filtering linked Stories by their key's project prefix (see
-# _in_allowed_projects) — a CR/Epic/Outcome in ACC/ACBD can link to a
-# Story in a totally different project, which the discovery JQL alone
-# can't filter (linkedIssues() has no project clause), so linked results
-# need their own explicit filter too.
-ALLOWED_PROJECTS = [p.strip().upper() for p in os.environ.get("ALLOWED_PROJECTS", "ACC,ACBD").split(",") if p.strip()]
-_ALLOWED_PROJECTS_JQL = "project in (" + ", ".join(f'"{p}"' for p in ALLOWED_PROJECTS) + ")"
+# Board membership (see _get_allowed_issue_keys below) is the actual scope
+# restriction — a CR/Epic/Outcome on an allowed board can link to a Story
+# that isn't, which discovery JQL alone can't filter (linkedIssues() has
+# no board clause), so linked results get their own explicit membership
+# check too, using the same allowed_keys set.
+ALLOWED_BOARD_NAMES = [b.strip() for b in os.environ.get("ALLOWED_BOARD_NAMES", "ACC,ACBD").split(",") if b.strip()]
 
-CR_DISCOVERY_JQL = os.environ.get("CR_DISCOVERY_JQL", f'{_ALLOWED_PROJECTS_JQL} AND issuetype = "Change Request"')
+CR_DISCOVERY_JQL = os.environ.get("CR_DISCOVERY_JQL", 'issuetype = "Change Request"')
 
 # Scrum Team is a filter dimension, not a mandatory field check, so it
 # lives here rather than in field_rules.py's CR/EPIC/OUTCOME_FIELDS.
 SCRUM_TEAM_FIELD_ID = os.environ.get("SCRUM_TEAM_FIELD_ID", "customfield_21304")
-OUTCOME_DISCOVERY_JQL = os.environ.get("OUTCOME_DISCOVERY_JQL", f'{_ALLOWED_PROJECTS_JQL} AND issuetype = "Outcome"')
-EPIC_DISCOVERY_JQL = os.environ.get("EPIC_DISCOVERY_JQL", f'{_ALLOWED_PROJECTS_JQL} AND issuetype = "Epic"')
+OUTCOME_DISCOVERY_JQL = os.environ.get("OUTCOME_DISCOVERY_JQL", 'issuetype = "Outcome"')
+EPIC_DISCOVERY_JQL = os.environ.get("EPIC_DISCOVERY_JQL", 'issuetype = "Epic"')
 
 
-def _in_allowed_projects(issue_key):
-    """Jira issue keys are always PROJECTKEY-NUMBER — this checks that
-    prefix against ALLOWED_PROJECTS. Used to filter linked Stories,
-    since linkedIssues() search has no project clause of its own (a CR
-    in ACC/ACBD can legitimately link to a Story in a different
-    project, which needs to be excluded explicitly here)."""
-    if not issue_key or "-" not in issue_key:
-        return False
-    return issue_key.split("-")[0].upper() in ALLOWED_PROJECTS
+def _get_allowed_issue_keys():
+    """Every issue key currently on any board named in ALLOWED_BOARD_NAMES
+    (ACC, ACBD by default) — the actual source of truth for scoping the
+    scan, since board membership isn't something JQL can filter on
+    directly (unlike a project, boards aren't encoded in the issue key
+    either, so this has to be a real membership lookup, not a JQL clause
+    or a key-prefix check). Synchronous (jira_rest uses `requests`) —
+    callers should run this via asyncio.to_thread."""
+    all_boards = jira_rest.get_boards()
+    matching_boards = [b for b in all_boards if b.get("name") in ALLOWED_BOARD_NAMES]
+    if not matching_boards:
+        print(f"[scan] WARNING: no boards found matching {ALLOWED_BOARD_NAMES} — "
+              f"check the exact board names in Jira, or set ALLOWED_BOARD_NAMES to override.")
+        return set()
+
+    allowed_keys = set()
+    for board in matching_boards:
+        issues = jira_rest.search_board_issues(board["id"])
+        allowed_keys.update(i.get("key") for i in issues if i.get("key"))
+    return allowed_keys
 
 # How many direct-REST fetches (jira_rest.get_issue_raw) run concurrently.
 # These are blocking HTTP calls, moved off the event loop via
@@ -726,7 +735,12 @@ async def _run_full_scan(project_key=None, board_id=None):
         async with ClientSession(read, write) as session:
             await session.initialize()
 
+            print(f"[scan] fetching board membership for {ALLOWED_BOARD_NAMES}...")
+            allowed_keys = await asyncio.to_thread(_get_allowed_issue_keys)
+            print(f"[scan] {len(allowed_keys)} issue keys currently on allowed boards")
+
             crs = await _discover_issues(session, CR_DISCOVERY_JQL, project_key, board_id)
+            crs = [c for c in crs if c.get("key") in allowed_keys]
             issue_summaries.update({c.get("key"): c.get("summary") for c in crs})
             print(f"[scan] discovered {len(crs)} CRs, fetching field data concurrently...")
             cr_raw_by_key = await _fetch_raw_concurrent([cr.get("key") for cr in crs])
@@ -763,7 +777,7 @@ async def _run_full_scan(project_key=None, board_id=None):
                     if epic_key:
                         epic_to_cr_entries.setdefault(epic_key, []).append((cr_key, cr_status))
 
-                linked = [i for i in cr_linked_by_key.get(cr_key, []) if _in_allowed_projects(i.get("key"))]
+                linked = [i for i in cr_linked_by_key.get(cr_key, []) if i.get("key") in allowed_keys]
 
                 for issue in linked:
                     if (issue.get("issue_type") or {}).get("name") != "Story":
@@ -795,6 +809,7 @@ async def _run_full_scan(project_key=None, board_id=None):
 
             # Epic <- CR bottleneck check, using the Epic Links collected above.
             epics = await _discover_issues(session, EPIC_DISCOVERY_JQL, project_key, board_id)
+            epics = [e for e in epics if e.get("key") in allowed_keys]
             issue_summaries.update({e.get("key"): e.get("summary") for e in epics})
             print(f"[scan] discovered {len(epics)} Epics, fetching field data concurrently...")
             epic_raw_by_key = await _fetch_raw_concurrent([epic.get("key") for epic in epics])
@@ -837,6 +852,7 @@ async def _run_full_scan(project_key=None, board_id=None):
 
             # Outcome field-completeness + Story <- Outcome phase alignment
             outcomes = await _discover_issues(session, OUTCOME_DISCOVERY_JQL, project_key, board_id)
+            outcomes = [o for o in outcomes if o.get("key") in allowed_keys]
             issue_summaries.update({o.get("key"): o.get("summary") for o in outcomes})
             print(f"[scan] discovered {len(outcomes)} Outcomes, fetching field data concurrently...")
             outcome_raw_by_key = await _fetch_raw_concurrent([o.get("key") for o in outcomes])
@@ -859,7 +875,7 @@ async def _run_full_scan(project_key=None, board_id=None):
                     if scrum_team:
                         issue_scrum_teams[outcome_key] = scrum_team
 
-                outcome_linked = [i for i in outcome_linked_by_key.get(outcome_key, []) if _in_allowed_projects(i.get("key"))]
+                outcome_linked = [i for i in outcome_linked_by_key.get(outcome_key, []) if i.get("key") in allowed_keys]
 
                 for issue in outcome_linked:
                     if (issue.get("issue_type") or {}).get("name") != "Story":
@@ -1207,10 +1223,6 @@ def list_projects():
         projects = jira_rest.get_projects()
     except Exception as e:
         return jsonify({"error": f"Could not fetch projects: {e}"}), 500
-    # Only offer projects the scan is actually restricted to — same
-    # ALLOWED_PROJECTS used for discovery JQL, so the dropdown never
-    # shows a choice that would silently return zero results.
-    projects = [p for p in projects if (p.get("key") or "").upper() in ALLOWED_PROJECTS]
     return jsonify({"items": projects, "default_project_key": os.environ.get("DEFAULT_PROJECT_KEY", "")})
 
 
@@ -1221,6 +1233,9 @@ def list_boards():
         boards = jira_rest.get_boards(project_key=project_key)
     except Exception as e:
         return jsonify({"error": f"Could not fetch boards: {e}"}), 500
+    # Dropdown only ever offers the same boards the scan is restricted to
+    # (ALLOWED_BOARD_NAMES) — never a choice that would return nothing.
+    boards = [b for b in boards if b.get("name") in ALLOWED_BOARD_NAMES]
     return jsonify({"items": boards})
 
 
