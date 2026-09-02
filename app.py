@@ -1207,6 +1207,10 @@ def list_projects():
         projects = jira_rest.get_projects()
     except Exception as e:
         return jsonify({"error": f"Could not fetch projects: {e}"}), 500
+    # Only offer projects the scan is actually restricted to — same
+    # ALLOWED_PROJECTS used for discovery JQL, so the dropdown never
+    # shows a choice that would silently return zero results.
+    projects = [p for p in projects if (p.get("key") or "").upper() in ALLOWED_PROJECTS]
     return jsonify({"items": projects, "default_project_key": os.environ.get("DEFAULT_PROJECT_KEY", "")})
 
 
