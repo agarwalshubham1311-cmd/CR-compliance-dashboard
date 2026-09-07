@@ -398,7 +398,7 @@ export default function App() {
             <p style={{ fontSize: 14, color: '#505a5f', margin: '4px 0 10px' }}>Review before posting</p>
             <textarea value={draft.text} onChange={e => setDraft(d => ({ ...d, text: e.target.value }))} />
             <div className="actions">
-              <button className="btn-primary" onClick={postDraft}>Post to Jira</button>
+              
               <button onClick={() => setDraft(null)}>Discard</button>
             </div>
             <p id="draftStatus">{draft.statusMsg}</p>
@@ -561,8 +561,6 @@ function PhaseTable({ cfg, rows, reasonFilter, sevFilter, sortAsc, setSortAsc, e
                   <td><span className={'badge badge-' + d.severity}>{d.severity}</span></td>
                   {cfg.hasActions && (
                     <td onClick={e => e.stopPropagation()}>
-                      {cfg.hasResolve && <button onClick={() => onResolve(d.leftKey, d.rightKey)}>Resolve</button>}{' '}
-                      <button onClick={() => onStatusChange(targetKey)}>Change status</button>{' '}
                       <button onClick={() => onDraft(targetKey, targetStatus, otherKey, otherStatus, d.reason, d.severity)}>Draft</button>
                     </td>
                   )}
@@ -601,10 +599,8 @@ function PhaseTable({ cfg, rows, reasonFilter, sevFilter, sortAsc, setSortAsc, e
                         </div>
                         <div className="detail-actions">
                           {cfg.hasActions && <>
-                            <button onClick={() => onStatusChange(targetKey)}><i className="ti ti-replace" style={{ fontSize: 14, marginRight: 6 }} aria-hidden="true"></i>Change status</button>
                             <button onClick={() => onDraft(targetKey, targetStatus, otherKey, otherStatus, d.reason, d.severity)}><i className="ti ti-message" style={{ fontSize: 14, marginRight: 6 }} aria-hidden="true"></i>Draft comment</button>
                           </>}
-                          {cfg.hasResolve && <button onClick={() => onResolve(d.leftKey, d.rightKey)}><i className="ti ti-check" style={{ fontSize: 14, marginRight: 6 }} aria-hidden="true"></i>Mark resolved</button>}
                           <a href={jiraBase + d.leftKey} target="_blank" rel="noreferrer">Open in Jira <i className="ti ti-external-link" style={{ fontSize: 14 }} aria-hidden="true"></i></a>
                         </div>
                       </div>
@@ -658,7 +654,7 @@ function FieldTable({ findings, reasonFilter, sevFilter, entityType, expandedKey
                   <td onClick={e => e.stopPropagation()}><button onClick={() => onDraft(g.key, g.status, g.findings)}>Draft</button></td>
                   <td className="chevron">{isOpen ? '\u25be' : '\u25b8'}</td>
                 </tr>
-                {isOpen && <EditableFieldsRow entityKey={g.key} entityType={entityType} fieldCache={fieldCache} onSaved={onSaved} findings={g.findings} />}
+                {isOpen && <EditableFieldsRow entityKey={g.key} entityType={entityType} fieldCache={fieldCache} findings={g.findings} />}
               </React.Fragment>
             )
           })}
@@ -668,10 +664,9 @@ function FieldTable({ findings, reasonFilter, sevFilter, entityType, expandedKey
   )
 }
 
-function EditableFieldsRow({ entityKey, entityType, fieldCache, onSaved, findings }) {
+function EditableFieldsRow({ entityKey, entityType, fieldCache, findings }) {
   const [fields, setFields] = useState(null)
   const [error, setError] = useState(null)
-  const [msgs, setMsgs] = useState({})
 
   useEffect(() => {
     let cancelled = false
@@ -682,20 +677,6 @@ function EditableFieldsRow({ entityKey, entityType, fieldCache, onSaved, finding
     })
     return () => { cancelled = true }
   }, [entityKey, entityType, fieldCache])
-
-  async function save(fieldKey, value) {
-    setMsgs(m => ({ ...m, [fieldKey]: 'Saving...' }))
-    const result = await fetchJSON('/api/jira/update-field', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ issue_key: entityKey, entity_type: entityType, field_key: fieldKey, value }),
-    })
-    if (result.error) {
-      setMsgs(m => ({ ...m, [fieldKey]: 'Error: ' + result.error }))
-    } else {
-      setMsgs(m => ({ ...m, [fieldKey]: 'Saved \u2713' }))
-      setTimeout(onSaved, 1000)
-    }
-  }
 
   const emptyCount = fields ? fields.filter(f => f.value === null || f.value === undefined || f.value === '').length : 0
   const flaggedCount = findings ? findings.length : 0
@@ -725,8 +706,7 @@ function EditableFieldsRow({ entityKey, entityType, fieldCache, onSaved, finding
                 Showing all {fields.length} fields — {emptyCount} empty, {flaggedCount} flagged issue{flaggedCount === 1 ? '' : 's'} below.
               </p>
               {fields.map(f => (
-                <FieldEditor key={f.key} field={f} msg={msgs[f.key]} onSave={v => save(f.key, v)}
-                             issues={findingsByLabel[f.label]} />
+                <FieldEditor key={f.key} field={f} issues={findingsByLabel[f.label]} />
               ))}
             </>
           )}
@@ -736,25 +716,11 @@ function EditableFieldsRow({ entityKey, entityType, fieldCache, onSaved, finding
   )
 }
 
-function FieldEditor({ field, msg, onSave, issues }) {
+function FieldEditor({ field, issues }) {
   const isSet = field.value !== null && field.value !== undefined && field.value !== ''
-  const [val, setVal] = useState(
-    field.type === 'labels' ? (Array.isArray(field.value) ? field.value.join(', ') : '') : (field.value ?? '')
-  )
-
-  let input
-  if (field.type === 'select' && field.options) {
-    input = (
-      <select value={val} onChange={e => setVal(e.target.value)}>
-        <option value="">Choose...</option>
-        {field.options.map(o => <option key={o} value={o}>{o}</option>)}
-      </select>
-    )
-  } else if (field.type === 'date') {
-    input = <input type="date" value={val || ''} onChange={e => setVal(e.target.value)} />
-  } else {
-    input = <input type="text" value={val} onChange={e => setVal(e.target.value)} placeholder={field.type === 'labels' ? 'comma-separated' : ''} />
-  }
+  const displayValue = field.type === 'labels'
+    ? (Array.isArray(field.value) ? field.value.join(', ') : '')
+    : (field.value ?? '')
 
   const sevColor = { High: '#f47738', Medium: '#1d70b8', Low: '#626a6e', Critical: '#d4351c' };
   const hasIssues = issues && issues.length > 0;
@@ -763,9 +729,9 @@ function FieldEditor({ field, msg, onSave, issues }) {
     <div className="field-row" style={{ flexWrap: 'wrap' }}>
       <span className="field-label">{field.label}</span>
       <span className={'field-state ' + (isSet ? 'set' : 'unset')}>{isSet ? 'set' : 'not set'}</span>
-      {input}
-      <button className="btn-primary" onClick={() => onSave(val)}>Save</button>
-      <span style={{ fontSize: 14, color: '#505a5f' }}>{msg}</span>
+      <span style={{ fontSize: 16, color: isSet ? '#0b0c0c' : '#626a6e', fontStyle: isSet ? 'normal' : 'italic' }}>
+        {isSet ? displayValue : 'Not set'}
+      </span>
       {hasIssues && (
         <div style={{ width: '100%', paddingLeft: 240, marginTop: 2 }}>
           {issues.map((iss, i) => (
