@@ -1,7 +1,10 @@
 import sys
 import os
+import logging
 import requests
 from requests.auth import HTTPBasicAuth
+
+logger = logging.getLogger(__name__)
 
 # SSL trust setup differs by platform:
 #
@@ -29,8 +32,8 @@ else:
 
 JIRA_URL = os.environ.get("JIRA_URL")
 JIRA_USERNAME = os.environ.get("JIRA_USERNAME")
-JIRA_API_TOKEN = os.environ.get("JIRA_API_TOKEN")
-
+JIRA_PASSWORD = os.environ.get("JIRA_PASSWORD")
+JIRA_PASSWORD = os.environ.get("JIRA_PASSWORD")  # optional, only for mcp-atlassian's curated endpoints
 
 def get_issue_raw(issue_key):
     """Fetch the full raw issue JSON directly from Jira's REST API —
@@ -38,23 +41,23 @@ def get_issue_raw(issue_key):
     (Complexity, RAG Status, etc.) are available for compliance checks.
     Raises on missing credentials or a failed request."""
     _require_creds()
-    url = f"{JIRA_URL.rstrip('/')}/rest/api/3/issue/{issue_key}"
-    resp = requests.get(url, auth=HTTPBasicAuth(JIRA_USERNAME, JIRA_API_TOKEN), timeout=30)
+    url = f"{JIRA_URL.rstrip('/')}/rest/api/2/issue/{issue_key}"
+    resp = requests.get(url, auth=HTTPBasicAuth(JIRA_USERNAME, JIRA_PASSWORD), timeout=30)
     resp.raise_for_status()
     return resp.json()
 
 
 def _require_creds():
-    if not all([JIRA_URL, JIRA_USERNAME, JIRA_API_TOKEN]):
+    if not all([JIRA_URL, JIRA_USERNAME, JIRA_PASSWORD]):
         raise RuntimeError(
-            "JIRA_URL / JIRA_USERNAME / JIRA_API_TOKEN must be set in the Flask "
+            "JIRA_URL / JIRA_USERNAME / JIRA_PASSWORD must be set in the Flask "
             "app's own environment (not just jira.env for the Docker container) "
             "for direct field access to work."
         )
 
 
 def _auth():
-    return HTTPBasicAuth(JIRA_USERNAME, JIRA_API_TOKEN)
+    return HTTPBasicAuth(JIRA_USERNAME, JIRA_PASSWORD)
 
 
 def get_available_transitions(issue_key):
@@ -62,7 +65,7 @@ def get_available_transitions(issue_key):
     now, per Jira's own workflow — never a hardcoded guess. Each entry:
     {"id": "...", "name": "...", "to_status": "..."}"""
     _require_creds()
-    url = f"{JIRA_URL.rstrip('/')}/rest/api/3/issue/{issue_key}/transitions"
+    url = f"{JIRA_URL.rstrip('/')}/rest/api/2/issue/{issue_key}/transitions"
     resp = requests.get(url, auth=_auth(), timeout=30)
     resp.raise_for_status()
     transitions = resp.json().get("transitions", [])
@@ -78,7 +81,7 @@ def transition_issue(issue_key, transition_id):
     ID, and validating against the real available list prevents silently
     failed or wrong-workflow writes."""
     _require_creds()
-    url = f"{JIRA_URL.rstrip('/')}/rest/api/3/issue/{issue_key}/transitions"
+    url = f"{JIRA_URL.rstrip('/')}/rest/api/2/issue/{issue_key}/transitions"
     resp = requests.post(url, json={"transition": {"id": transition_id}}, auth=_auth(), timeout=30)
     resp.raise_for_status()
     return {"success": True}
@@ -90,7 +93,7 @@ def update_issue_fields(issue_key, fields_payload):
     select-type field needs {"value": "High"}, plain text/dates are the
     raw value, labels are a list."""
     _require_creds()
-    url = f"{JIRA_URL.rstrip('/')}/rest/api/3/issue/{issue_key}"
+    url = f"{JIRA_URL.rstrip('/')}/rest/api/2/issue/{issue_key}"
     resp = requests.put(url, json={"fields": fields_payload}, auth=_auth(), timeout=30)
     if not resp.ok:
         # Jira's error body has the actual reason (which field, why) —
@@ -108,32 +111,124 @@ def update_issue_fields(issue_key, fields_payload):
             pass
         raise RuntimeError(f"Jira rejected the update ({resp.status_code}): {detail or resp.text[:300]}")
     return {"success": True}
-
-
 def get_projects():
-    """Every Jira project these credentials can see. Uses the paginated
-    project/search endpoint (the older /project endpoint is deprecated)."""
+    """Return only Jira projects whose key starts with ACC."""
     _require_creds()
-    url = f"{JIRA_URL.rstrip('/')}/rest/api/3/project/search"
+
+    url = f"{JIRA_URL.rstrip('/')}/rest/api/2/project"
+    projects = []
+    start_at = 0
+
+    while True:
+        try:
+            resp = requests.get(
+                url,
+                params={"startAt": start_at, "maxResults": 50},
+                auth=_auth(),
+                timeout=30
+            )
+            resp.raise_for_status()
+            data = resp.json()
+
+            # Jira Data Center: response is a direct array
+            if isinstance(data, list):
+                logger.info(
+                    "get_projects: Received Jira Data Center format with %d projects",
+                    len(data)
+                )
+
+                for p in data:
+                    key = p.get("key")
+
+                    if key and key.upper() == "ACC":
+                        projects.append({
+                            "key": key,
+                            "name": p.get("name")
+                        })
+
+                break
+
+            # Jira Cloud: paginated response
+            else:
+                values = data.get("values", [])
+
+                logger.info(
+                    "get_projects: Received Jira Cloud format with %d projects in this page",
+                    len(values)
+                )
+
+                for p in values:
+                    key = p.get("key")
+
+                if key and key.upper() == "ACC":
+                        projects.append({
+                            "key": key,
+                            "name": p.get("name")
+                        })
+
+                if data.get("isLast", True):
+                    break
+
+                start_at += data.get("maxResults", 50)
+
+        except Exception as e:
+            logger.error(
+                "Error fetching projects: %s",
+                e,
+                exc_info=True
+            )
+            raise
+
+    logger.info(
+        "get_projects: Returning %d ACC projects",
+        len(projects)
+    )
+
+    return projects
+
+def get_projects11():
+    """Every Jira project these credentials can see. Jira Data Center returns
+    a JSON array directly, while Cloud returns a paginated response with values."""
+    _require_creds()
+    url = f"{JIRA_URL.rstrip('/')}/rest/api/2/project"
     projects, start_at = [], 0
     while True:
-        resp = requests.get(url, params={"startAt": start_at, "maxResults": 50}, auth=_auth(), timeout=30)
-        resp.raise_for_status()
-        data = resp.json()
-        for p in data.get("values", []):
-            projects.append({"key": p.get("key"), "name": p.get("name")})
-        if data.get("isLast", True):
-            break
-        start_at += data.get("maxResults", 50)
+        try:
+            resp = requests.get(url, params={"startAt": start_at, "maxResults": 50}, auth=_auth(), timeout=30)
+            resp.raise_for_status()
+            data = resp.json()
+
+            # Handle both Jira Data Center (direct array) and Cloud (paginated with values key)
+            if isinstance(data, list):
+                # Jira Data Center: response is a direct array
+                logger.info("get_projects: Received Jira Data Center format (direct array) with %d projects", len(data))
+                for p in data:
+                    projects.append({"key": p.get("key"), "name": p.get("name")})
+                break  # No pagination in direct array response
+            else:
+                # Jira Cloud: response is a dict with values key
+                values = data.get("values", [])
+                logger.info("get_projects: Received Jira Cloud format (paginated) with %d projects in this page", len(values))
+                for p in values:
+                    projects.append({"key": p.get("key"), "name": p.get("name")})
+                if data.get("isLast", True):
+                    break
+                start_at += data.get("maxResults", 50)
+        except Exception as e:
+            logger.error("Error fetching projects: %s", e, exc_info=True)
+            raise
+
+    logger.info("get_projects: Returning %d total projects", len(projects))
     return projects
 
 
 def get_boards(project_key=None):
     """Boards (Scrum/Kanban) visible to these credentials, optionally
     scoped to one project. Boards live under Jira's separate Agile REST
-    API (/rest/agile/1.0/), not the standard /rest/api/3/ used
+    API (/rest/agile/1.0/), not the standard /rest/api/2/ used
     everywhere else in this file — a board isn't a JQL-queryable concept,
-    it's tied to a filter configured on the board itself."""
+    it's tied to a filter configured on the board itself.
+    Handles both Jira Data Center (direct array) and Cloud (paginated) responses."""
     _require_creds()
     url = f"{JIRA_URL.rstrip('/')}/rest/agile/1.0/board"
     params = {"maxResults": 50}
@@ -141,15 +236,33 @@ def get_boards(project_key=None):
         params["projectKeyOrId"] = project_key
     boards, start_at = [], 0
     while True:
-        params["startAt"] = start_at
-        resp = requests.get(url, params=params, auth=_auth(), timeout=30)
-        resp.raise_for_status()
-        data = resp.json()
-        for b in data.get("values", []):
-            boards.append({"id": b.get("id"), "name": b.get("name"), "type": b.get("type")})
-        if data.get("isLast", True):
-            break
-        start_at += data.get("maxResults", 50)
+        try:
+            params["startAt"] = start_at
+            resp = requests.get(url, params=params, auth=_auth(), timeout=30)
+            resp.raise_for_status()
+            data = resp.json()
+
+            # Handle both Jira Data Center (direct array) and Cloud (paginated with values key)
+            if isinstance(data, list):
+                # Jira Data Center: response is a direct array
+                logger.info("get_boards: Received Jira Data Center format (direct array) with %d boards for project %s", len(data), project_key)
+                for b in data:
+                    boards.append({"id": b.get("id"), "name": b.get("name"), "type": b.get("type")})
+                break  # No pagination in direct array response
+            else:
+                # Jira Cloud: response is a dict with values key
+                values = data.get("values", [])
+                logger.info("get_boards: Received Jira Cloud format (paginated) with %d boards in this page for project %s", len(values), project_key)
+                for b in values:
+                    boards.append({"id": b.get("id"), "name": b.get("name"), "type": b.get("type")})
+                if data.get("isLast", True):
+                    break
+                start_at += data.get("maxResults", 50)
+        except Exception as e:
+            logger.error("Error fetching boards for project %s: %s", project_key, e, exc_info=True)
+            raise
+
+    logger.info("get_boards: Returning %d total boards for project %s", len(boards), project_key)
     return boards
 
 

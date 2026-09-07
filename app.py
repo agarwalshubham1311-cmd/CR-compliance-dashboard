@@ -550,25 +550,48 @@ OUTCOME_DISCOVERY_JQL = os.environ.get("OUTCOME_DISCOVERY_JQL", 'issuetype = "Ou
 EPIC_DISCOVERY_JQL = os.environ.get("EPIC_DISCOVERY_JQL", 'issuetype = "Epic"')
 
 
-def _get_allowed_issue_keys():
-    """Every issue key currently on any board named in ALLOWED_BOARD_NAMES
-    (ACC, ACBD by default) — the actual source of truth for scoping the
-    scan, since board membership isn't something JQL can filter on
-    directly (unlike a project, boards aren't encoded in the issue key
-    either, so this has to be a real membership lookup, not a JQL clause
-    or a key-prefix check). Synchronous (jira_rest uses `requests`) —
-    callers should run this via asyncio.to_thread."""
-    all_boards = jira_rest.get_boards()
-    matching_boards = [b for b in all_boards if b.get("name") in ALLOWED_BOARD_NAMES]
-    if not matching_boards:
-        print(f"[scan] WARNING: no boards found matching {ALLOWED_BOARD_NAMES} — "
-              f"check the exact board names in Jira, or set ALLOWED_BOARD_NAMES to override.")
-        return set()
+def _get_allowed_issue_keys(board_id=None, project_key=None):
+    """Every issue key currently on the specified board or boards in ALLOWED_BOARD_NAMES.
+
+    - If board_id is provided: fetch issues only from that specific board
+    - If project_key is provided: fetch issues from all boards matching that project
+    - Otherwise: fetch issues from all boards matching ALLOWED_BOARD_NAMES
+
+    The board membership is the actual source of truth for scoping the scan, since
+    board membership isn't something JQL can filter on directly (unlike a project,
+    boards aren't encoded in the issue key either, so this has to be a real membership
+    lookup, not a JQL clause or a key-prefix check).
+
+    Synchronous (jira_rest uses `requests`) — callers should run this via asyncio.to_thread."""
 
     allowed_keys = set()
-    for board in matching_boards:
-        issues = jira_rest.search_board_issues(board["id"])
+
+    if board_id:
+        # Fetch issues from the specific selected board only
+        print(f"[scan] fetching issues from selected board {board_id}...")
+        issues = jira_rest.search_board_issues(board_id)
         allowed_keys.update(i.get("key") for i in issues if i.get("key"))
+        print(f"[scan] found {len(allowed_keys)} issues on board {board_id}")
+    else:
+        # Fetch issues from all allowed boards
+        all_boards = jira_rest.get_boards(project_key=project_key)
+        # Filter to only boards in ALLOWED_BOARD_NAMES
+        matching_boards = [b for b in all_boards if b.get("name") in ALLOWED_BOARD_NAMES]
+
+        if not matching_boards:
+            if project_key:
+                print(f"[scan] WARNING: no boards found for project {project_key} matching {ALLOWED_BOARD_NAMES} — "
+                      f"check the exact board names in Jira, or set ALLOWED_BOARD_NAMES to override.")
+            else:
+                print(f"[scan] WARNING: no boards found matching {ALLOWED_BOARD_NAMES} — "
+                      f"check the exact board names in Jira, or set ALLOWED_BOARD_NAMES to override.")
+            return set()
+
+        print(f"[scan] fetching issues from {len(matching_boards)} allowed boards...")
+        for board in matching_boards:
+            issues = jira_rest.search_board_issues(board["id"])
+            allowed_keys.update(i.get("key") for i in issues if i.get("key"))
+
     return allowed_keys
 
 # How many direct-REST fetches (jira_rest.get_issue_raw) run concurrently.
@@ -731,16 +754,34 @@ async def _run_full_scan(project_key=None, board_id=None):
     issue_summaries = {}  # issue_key -> summary/title, collected from every discovery point below
     issue_scrum_teams = {}  # issue_key -> Scrum Team value, collected from CR/Epic/Outcome raw data
 
+    app.logger.info(
+        "[scan] Starting full scan: project_key=%s board_id=%s",
+        project_key,
+        board_id,
+    )
+    print("DEBUG MCP_SERVER_URL =", repr(MCP_SERVER_URL), flush=True)
+
     async with sse_client(MCP_SERVER_URL) as (read, write):
         async with ClientSession(read, write) as session:
             await session.initialize()
 
-            print(f"[scan] fetching board membership for {ALLOWED_BOARD_NAMES}...")
-            allowed_keys = await asyncio.to_thread(_get_allowed_issue_keys)
-            print(f"[scan] {len(allowed_keys)} issue keys currently on allowed boards")
+            print(f"[scan] fetching board membership...")
+            allowed_keys = await asyncio.to_thread(_get_allowed_issue_keys, board_id, project_key)
+            print(f"[scan] {len(allowed_keys)} issue keys to process")
 
             crs = await _discover_issues(session, CR_DISCOVERY_JQL, project_key, board_id)
+            app.logger.info(
+                "[scan] Discovered %d CRs before board filtering (project=%s board_id=%s)",
+                len(crs),
+                project_key,
+                board_id,
+            )
             crs = [c for c in crs if c.get("key") in allowed_keys]
+            app.logger.info(
+                "[scan] CRs after board/allowed filtering: %d (allowed_keys count=%d)",
+                len(crs),
+                len(allowed_keys),
+            )
             issue_summaries.update({c.get("key"): c.get("summary") for c in crs})
             print(f"[scan] discovered {len(crs)} CRs, fetching field data concurrently...")
             cr_raw_by_key = await _fetch_raw_concurrent([cr.get("key") for cr in crs])
@@ -809,7 +850,14 @@ async def _run_full_scan(project_key=None, board_id=None):
 
             # Epic <- CR bottleneck check, using the Epic Links collected above.
             epics = await _discover_issues(session, EPIC_DISCOVERY_JQL, project_key, board_id)
+            app.logger.info(
+                "[scan] Discovered %d Epics before board filtering (project=%s board_id=%s)",
+                len(epics),
+                project_key,
+                board_id,
+            )
             epics = [e for e in epics if e.get("key") in allowed_keys]
+            app.logger.info("[scan] Epics after board/allowed filtering: %d", len(epics))
             issue_summaries.update({e.get("key"): e.get("summary") for e in epics})
             print(f"[scan] discovered {len(epics)} Epics, fetching field data concurrently...")
             epic_raw_by_key = await _fetch_raw_concurrent([epic.get("key") for epic in epics])
@@ -852,7 +900,14 @@ async def _run_full_scan(project_key=None, board_id=None):
 
             # Outcome field-completeness + Story <- Outcome phase alignment
             outcomes = await _discover_issues(session, OUTCOME_DISCOVERY_JQL, project_key, board_id)
+            app.logger.info(
+                "[scan] Discovered %d Outcomes before board filtering (project=%s board_id=%s)",
+                len(outcomes),
+                project_key,
+                board_id,
+            )
             outcomes = [o for o in outcomes if o.get("key") in allowed_keys]
+            app.logger.info("[scan] Outcomes after board/allowed filtering: %d", len(outcomes))
             issue_summaries.update({o.get("key"): o.get("summary") for o in outcomes})
             print(f"[scan] discovered {len(outcomes)} Outcomes, fetching field data concurrently...")
             outcome_raw_by_key = await _fetch_raw_concurrent([o.get("key") for o in outcomes])
@@ -1211,9 +1266,12 @@ def dashboard_refresh():
 @app.route("/api/config", methods=["GET"])
 def get_frontend_config():
     jira_url = os.environ.get("JIRA_URL", "").rstrip("/")
+    # Default to 'ACC' project if DEFAULT_PROJECT_KEY is not explicitly set
+    default_project = os.environ.get("DEFAULT_PROJECT_KEY", "ACC")
+    app.logger.info("Frontend config: jira_url=%s default_project_key=%s", jira_url, default_project)
     return jsonify({
         "jira_base": f"{jira_url}/browse/" if jira_url else "",
-        "default_project_key": os.environ.get("DEFAULT_PROJECT_KEY", ""),
+        "default_project_key": default_project,
     })
 
 
@@ -1235,7 +1293,7 @@ def list_boards():
         return jsonify({"error": f"Could not fetch boards: {e}"}), 500
     # Dropdown only ever offers the same boards the scan is restricted to
     # (ALLOWED_BOARD_NAMES) — never a choice that would return nothing.
-    boards = [b for b in boards if b.get("name") in ALLOWED_BOARD_NAMES]
+    #boards = [b for b in boards if b.get("name") in ALLOWED_BOARD_NAMES]
     return jsonify({"items": boards})
 
 
@@ -1399,10 +1457,10 @@ def dashboard():
 
 if __name__ == "__main__":
     # avoid starting the scheduler twice under Flask's debug reloader
-    if os.environ.get("WERKZEUG_RUN_MAIN") != "true" and not app.debug:
-        start_scheduler()
-    elif os.environ.get("WERKZEUG_RUN_MAIN") == "true":
-        start_scheduler()
+    #if os.environ.get("WERKZEUG_RUN_MAIN") != "true" and not app.debug:
+        #start_scheduler()
+    #elif os.environ.get("WERKZEUG_RUN_MAIN") == "true":
+        #start_scheduler()
     # threaded=True lets the server handle multiple requests at once —
     # without it, the dashboard's 6 parallel fetch() calls (loadAll())
     # get serialized one at a time server-side, adding their individual

@@ -9,9 +9,9 @@ import datetime
 import re
 
 CR_FIELDS = {
-    "epic_link": "customfield_10014",
-    "complexity": "customfield_10109",
-    "funded_by": "customfield_10106",
+    "epic_link": "customfield_10006",
+    "complexity": "customfield_15904",
+    "funded_by": "customfield_20702",
     "baseline_target_delivery_date": "customfield_10110",
     "baseline_prp_date": "customfield_10108",
     "actual_prp_start_date": "customfield_28402",
