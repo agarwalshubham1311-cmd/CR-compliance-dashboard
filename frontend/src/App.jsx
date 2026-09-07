@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react'
 import { BarChart, Bar, PieChart, Pie, Cell, XAxis, YAxis, ResponsiveContainer, Tooltip } from 'recharts'
 
-const SEV_COLORS = { Critical: '#e34948', High: '#eda100', Medium: '#2a78d6', Low: '#898781' }
+const SEV_COLORS = { Critical: '#d4351c', High: '#f47738', Medium: '#1d70b8', Low: '#626a6e' }
 
 function reasonMeta(reason) {
   const r = (reason || '').toLowerCase()
@@ -279,7 +279,7 @@ export default function App() {
           <p className="subtitle">{status || 'Loading...'}</p>
         </div>
         <div>
-          <button onClick={refresh}><i className="ti ti-refresh" style={{ fontSize: 14, marginRight: 6 }} aria-hidden="true"></i>Refresh</button>
+          <button className="btn-header" onClick={refresh}><i className="ti ti-refresh" style={{ fontSize: 14, marginRight: 6 }} aria-hidden="true"></i>Refresh</button>
         </div>
       </div>
 
@@ -391,14 +391,14 @@ export default function App() {
           <div className="modal-card" onClick={e => e.stopPropagation()}>
             <div className="modal-header">
               <p style={{ fontSize: 14, fontWeight: 500, margin: 0 }}>
-                AI-drafted comment for <span style={{ color: '#185fa5' }}>{draft.forKey}</span>
+                AI-drafted comment for <span style={{ color: '#1d70b8', fontWeight: 700 }}>{draft.forKey}</span>
               </p>
               <button className="modal-close" onClick={() => setDraft(null)} aria-label="Close">✕</button>
             </div>
-            <p style={{ fontSize: 12, color: '#888', margin: '4px 0 10px' }}>Review before posting</p>
+            <p style={{ fontSize: 14, color: '#505a5f', margin: '4px 0 10px' }}>Review before posting</p>
             <textarea value={draft.text} onChange={e => setDraft(d => ({ ...d, text: e.target.value }))} />
             <div className="actions">
-              <button onClick={postDraft}>Post to Jira</button>
+              <button className="btn-primary" onClick={postDraft}>Post to Jira</button>
               <button onClick={() => setDraft(null)}>Discard</button>
             </div>
             <p id="draftStatus">{draft.statusMsg}</p>
@@ -411,15 +411,15 @@ export default function App() {
           <div className="modal-card" onClick={e => e.stopPropagation()}>
             <div className="modal-header">
               <p style={{ fontSize: 14, fontWeight: 500, margin: 0 }}>
-                <span style={{ color: '#185fa5' }}>{titleModal.key}</span>
+                <span style={{ color: '#1d70b8', fontWeight: 700 }}>{titleModal.key}</span>
               </p>
               <button className="modal-close" onClick={() => setTitleModal(null)} aria-label="Close">✕</button>
             </div>
             <p style={{ fontSize: 15, fontWeight: 500, margin: '10px 0 4px' }}>{titleModal.summary || '(no title)'}</p>
-            <div style={{ fontSize: 13, color: '#555', marginTop: 10, whiteSpace: 'pre-wrap', maxHeight: 300, overflowY: 'auto' }}>
+            <div style={{ fontSize: 16, color: '#0b0c0c', marginTop: 10, whiteSpace: 'pre-wrap', maxHeight: 300, overflowY: 'auto' }}>
               {titleModal.loading && 'Loading description...'}
-              {titleModal.error && <span style={{ color: '#c0392b' }}>Error: {titleModal.error}</span>}
-              {!titleModal.loading && !titleModal.error && (titleModal.description || <span style={{ color: '#888' }}>No description set.</span>)}
+              {titleModal.error && <span style={{ color: '#d4351c', fontWeight: 700 }}>Error: {titleModal.error}</span>}
+              {!titleModal.loading && !titleModal.error && (titleModal.description || <span style={{ color: '#505a5f' }}>No description set.</span>)}
             </div>
           </div>
         </div>
@@ -572,7 +572,7 @@ function PhaseTable({ cfg, rows, reasonFilter, sevFilter, sortAsc, setSortAsc, e
                   <tr className="status-inline-row">
                     <td colSpan={cfg.hasActions ? 7 : 6}>
                       <div className="status-inline">
-                        <span style={{ fontSize: 13, fontWeight: 500, color: '#185fa5' }}>Change status for {targetKey}</span>
+                        <span style={{ fontSize: 16, fontWeight: 700, color: '#1d70b8' }}>Change status for {targetKey}</span>
                         {statusChange.transitions.length > 0 ? (
                           <select value={statusChange.selected} onChange={e => onSelectTransition(e.target.value)}>
                             {statusChange.transitions.map(t => (
@@ -580,12 +580,12 @@ function PhaseTable({ cfg, rows, reasonFilter, sevFilter, sortAsc, setSortAsc, e
                             ))}
                           </select>
                         ) : (
-                          <span style={{ fontSize: 12, color: '#888' }}>{statusChange.msg || 'Loading transitions...'}</span>
+                          <span style={{ fontSize: 14, color: '#505a5f' }}>{statusChange.msg || 'Loading transitions...'}</span>
                         )}
-                        {statusChange.transitions.length > 0 && <button onClick={onApplyStatus}>Apply</button>}
+                        {statusChange.transitions.length > 0 && <button className="btn-primary" onClick={onApplyStatus}>Apply</button>}
                         <button onClick={onCloseStatus}>Cancel</button>
                         {statusChange.msg && statusChange.transitions.length > 0 && (
-                          <span style={{ fontSize: 12, color: '#888' }}>{statusChange.msg}</span>
+                          <span style={{ fontSize: 14, color: '#505a5f' }}>{statusChange.msg}</span>
                         )}
                       </div>
                     </td>
@@ -721,7 +721,7 @@ function EditableFieldsRow({ entityKey, entityType, fieldCache, onSaved, finding
           {!error && !fields && <div>Loading current field values...</div>}
           {fields && (
             <>
-              <p style={{ fontSize: 12, color: '#888', margin: '0 0 8px' }}>
+              <p style={{ fontSize: 14, color: '#505a5f', margin: '0 0 8px' }}>
                 Showing all {fields.length} fields — {emptyCount} empty, {flaggedCount} flagged issue{flaggedCount === 1 ? '' : 's'} below.
               </p>
               {fields.map(f => (
@@ -756,7 +756,7 @@ function FieldEditor({ field, msg, onSave, issues }) {
     input = <input type="text" value={val} onChange={e => setVal(e.target.value)} placeholder={field.type === 'labels' ? 'comma-separated' : ''} />
   }
 
-  const sevColor = { High: '#c0392b', Medium: '#b5720a', Low: '#888', Critical: '#c0392b' };
+  const sevColor = { High: '#f47738', Medium: '#1d70b8', Low: '#626a6e', Critical: '#d4351c' };
   const hasIssues = issues && issues.length > 0;
 
   return (
@@ -764,8 +764,8 @@ function FieldEditor({ field, msg, onSave, issues }) {
       <span className="field-label">{field.label}</span>
       <span className={'field-state ' + (isSet ? 'set' : 'unset')}>{isSet ? 'set' : 'not set'}</span>
       {input}
-      <button onClick={() => onSave(val)}>Save</button>
-      <span style={{ fontSize: 12, color: '#888' }}>{msg}</span>
+      <button className="btn-primary" onClick={() => onSave(val)}>Save</button>
+      <span style={{ fontSize: 14, color: '#505a5f' }}>{msg}</span>
       {hasIssues && (
         <div style={{ width: '100%', paddingLeft: 240, marginTop: 2 }}>
           {issues.map((iss, i) => (
