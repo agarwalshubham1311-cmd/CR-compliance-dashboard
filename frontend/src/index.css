@@ -137,3 +137,7 @@ a.key-link:hover { color: #003078; }
 
 .issue-title { font-size: 13px; color: var(--text-secondary); margin-top: 2px; font-weight: 400; cursor: pointer; }
 .issue-title:hover { color: var(--text-accent); text-decoration: underline; }
+
+.pagination { display: flex; align-items: center; gap: 14px; padding: 12px 18px; border-top: 1px solid var(--border); font-size: 14px; }
+.pagination-info { color: var(--text-secondary); margin-right: auto; }
+.pagination-page { color: var(--text-secondary); }

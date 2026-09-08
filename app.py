@@ -546,6 +546,13 @@ CR_DISCOVERY_JQL = os.environ.get("CR_DISCOVERY_JQL", 'issuetype = "Change Reque
 # Scrum Team is a filter dimension, not a mandatory field check, so it
 # lives here rather than in field_rules.py's CR/EPIC/OUTCOME_FIELDS.
 SCRUM_TEAM_FIELD_ID = os.environ.get("SCRUM_TEAM_FIELD_ID", "customfield_21304")
+
+# Discovery-mechanism field IDs, confirmed against real production XML
+# exports — kept separate from field_rules.py's CR/EPIC/OUTCOME_FIELDS
+# (which drive the field-completeness checks, not discovery) since
+# those weren't touched in this pass.
+EPIC_LINK_FIELD_ID = os.environ.get("EPIC_LINK_FIELD_ID", "customfield_10006")
+PARENT_LINK_FIELD_ID = os.environ.get("PARENT_LINK_FIELD_ID", "customfield_14701")
 OUTCOME_DISCOVERY_JQL = os.environ.get("OUTCOME_DISCOVERY_JQL", 'issuetype = "Outcome"')
 EPIC_DISCOVERY_JQL = os.environ.get("EPIC_DISCOVERY_JQL", 'issuetype = "Epic"')
 
@@ -663,6 +670,37 @@ async def _linked_issues_concurrent(session, keys, limit=None):
     return results
 
 
+async def _epic_link_siblings_concurrent(session, epic_link_values, limit=None):
+    """Finds Stories that share the same Epic Link value as a CR —
+    confirmed against real production data that CR and Story are
+    SIBLINGS under one Epic (both point to it via the classic "Epic
+    Link" field), not linked to each other via issue-links at all.
+    This is additive to _linked_issues_concurrent's issue-links search,
+    not a replacement — some Stories may still be found via genuine
+    issue-links, so the caller unions both results.
+
+    "Epic Link" is a builtin JQL clause name in Jira (works without
+    needing the specific customfield ID in the query text), so this
+    reuses the same MCP search path as everything else. Deduped by
+    epic_link_values, since multiple CRs commonly share one Epic.
+    Returns {epic_link_value: [stories]}."""
+    sem = asyncio.Semaphore(limit or CONCURRENT_FETCH_LIMIT)
+    results = {}
+
+    async def _one(epic_key):
+        async with sem:
+            try:
+                results[epic_key] = await _search_all_issues(
+                    session, f'"Epic Link" = "{epic_key}" AND issuetype = Story'
+                )
+            except Exception as e:
+                print(f"[scan] could not fetch Epic Link siblings for {epic_key}: {e}")
+                results[epic_key] = []
+
+    await asyncio.gather(*(_one(k) for k in set(epic_link_values) if k))
+    return results
+
+
 async def _fetch_raw_concurrent(keys):
     """Fetch raw Jira data (for field-completeness checks) for multiple
     issues concurrently instead of one blocking call at a time. Each
@@ -748,6 +786,21 @@ async def _run_full_scan(project_key=None, board_id=None):
             cr_linked_by_key = await _linked_issues_concurrent(session, [cr.get("key") for cr in crs])
             for _linked_list in cr_linked_by_key.values():
                 issue_summaries.update({i.get("key"): i.get("summary") for i in _linked_list})
+
+            # Real production data confirmed CR and Story are siblings
+            # under one Epic (both use the classic Epic Link field), not
+            # linked to each other via issue-links — so also fetch
+            # sibling stories per CR's Epic Link value, unioned below
+            # with the issue-links search above rather than replacing it.
+            cr_epic_links = {
+                cr.get("key"): (cr_raw_by_key.get(cr.get("key")) or {}).get("fields", {}).get(EPIC_LINK_FIELD_ID)
+                for cr in crs
+            }
+            print(f"[scan] fetching Epic-Link sibling stories for {len(set(cr_epic_links.values()))} unique epics...")
+            epic_link_siblings_by_epic = await _epic_link_siblings_concurrent(session, cr_epic_links.values())
+            for _sibling_list in epic_link_siblings_by_epic.values():
+                issue_summaries.update({i.get("key"): i.get("summary") for i in _sibling_list})
+
             cr_field_map = _effective_field_map("cr")
 
             for cr in crs:
@@ -773,11 +826,19 @@ async def _run_full_scan(project_key=None, board_id=None):
                     if parent and isinstance(parent, dict):
                         epic_key = parent.get("key")
                     if not epic_key:
-                        epic_key = raw_fields.get(cr_field_map["epic_link"])
+                        epic_key = raw_fields.get(EPIC_LINK_FIELD_ID)
                     if epic_key:
                         epic_to_cr_entries.setdefault(epic_key, []).append((cr_key, cr_status))
 
-                linked = [i for i in cr_linked_by_key.get(cr_key, []) if i.get("key") in allowed_keys]
+                issuelinks_stories = cr_linked_by_key.get(cr_key, [])
+                sibling_stories = epic_link_siblings_by_epic.get(cr_epic_links.get(cr_key), [])
+                seen_keys = set()
+                linked = []
+                for i in issuelinks_stories + sibling_stories:
+                    k = i.get("key")
+                    if k and k not in seen_keys and k in allowed_keys:
+                        seen_keys.add(k)
+                        linked.append(i)
 
                 for issue in linked:
                     if (issue.get("issue_type") or {}).get("name") != "Story":
@@ -829,12 +890,18 @@ async def _run_full_scan(project_key=None, board_id=None):
                     if scrum_team:
                         issue_scrum_teams[epic_key] = scrum_team
 
-                    # An Epic's parent is an Outcome — same "parent" field
-                    # convention already used for CR's parent Epic lookup.
+                    # An Epic's parent is an Outcome — confirmed against
+                    # real production data that this is via the "Parent
+                    # Link" custom field (Advanced Roadmaps' parent-link
+                    # mechanism), not the native "parent" field. Native
+                    # parent kept as a fallback in case some issues do
+                    # use it.
                     outcome_key = None
                     parent = epic_fields.get("parent")
                     if parent and isinstance(parent, dict):
                         outcome_key = parent.get("key")
+                    if not outcome_key:
+                        outcome_key = epic_fields.get(PARENT_LINK_FIELD_ID)
                     if outcome_key:
                         outcome_to_epic_entries.setdefault(outcome_key, []).append((epic_key, epic_status))
 

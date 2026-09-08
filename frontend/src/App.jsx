@@ -24,6 +24,12 @@ function ReasonBadge({ reason }) {
 
 // Per-tab config: how to fetch, what columns to show, how each row's data is shaped.
 const TABS = {
+  outcome: {
+    label: 'Outcome', outcomeCombined: true,
+    columns: ['Story', 'Story status', 'Outcome', 'Outcome status', 'Reason', 'Severity'],
+    getRows: d => ({ leftKey: d.cr_key, leftStatus: d.cr_status, rightKey: d.story_key, rightStatus: d.story_status, reason: d.reason, severity: d.severity, score: d.score }),
+    hasActions: true, dependentSide: 'right',
+  },
   epic: {
     label: 'Epic', combined: true,
     columns: ['Epic', 'Epic status', 'Bottleneck CR', 'CR status', 'Reason', 'Severity'],
@@ -39,12 +45,6 @@ const TABS = {
     columns: ['Story', 'Story status', 'CR', 'CR status', 'Reason', 'Severity'],
     getRows: d => ({ leftKey: d.story_key, leftStatus: d.story_status, rightKey: d.cr_key, rightStatus: d.cr_status, reason: d.reason, severity: d.severity, score: d.score }),
     hasActions: true, hasResolve: true, dependentSide: 'left',
-  },
-  outcome: {
-    label: 'Outcome', outcomeCombined: true,
-    columns: ['Story', 'Story status', 'Outcome', 'Outcome status', 'Reason', 'Severity'],
-    getRows: d => ({ leftKey: d.cr_key, leftStatus: d.cr_status, rightKey: d.story_key, rightStatus: d.story_status, reason: d.reason, severity: d.severity, score: d.score }),
-    hasActions: true, dependentSide: 'right',
   },
 }
 
@@ -63,7 +63,7 @@ async function fetchJSON(url, opts) {
 }
 
 export default function App() {
-  const [currentTab, setCurrentTab] = useState('epic')
+  const [currentTab, setCurrentTab] = useState('outcome')
   const [jiraBase, setJiraBase] = useState('')
   const [data, setData] = useState({ epic: [], epicFields: [], cr: [], story: [], outcome: [], outcomeFields: [], outcomeEpic: [] })
   const [summaries, setSummaries] = useState({})
@@ -74,6 +74,7 @@ export default function App() {
   const [epicFieldsExpandedKey, setEpicFieldsExpandedKey] = useState(null)
   const [outcomeFieldsExpandedKey, setOutcomeFieldsExpandedKey] = useState(null)
   const [reasonFilter, setReasonFilter] = useState('all')
+  const [fieldReasonFilter, setFieldReasonFilter] = useState('all')
   const [sevFilter, setSevFilter] = useState('all')
   const [sortAsc, setSortAsc] = useState(false)
   const [draft, setDraft] = useState(null) // { forKey, text, statusMsg }
@@ -263,6 +264,7 @@ export default function App() {
     setCurrentTab(tab)
     setExpandedKey(null)
     setReasonFilter('all')
+    setFieldReasonFilter('all')
     setSevFilter('all')
     setScrumTeamFilter('all')
   }
@@ -315,6 +317,8 @@ export default function App() {
 
       <div className="filters">
         <ReasonFilter tab={currentTab} data={data} value={reasonFilter} onChange={setReasonFilter} />
+        {cfg.combined && <FieldReasonFilter findings={data.epicFields} value={fieldReasonFilter} onChange={setFieldReasonFilter} />}
+        {cfg.outcomeCombined && <FieldReasonFilter findings={data.outcomeFields} value={fieldReasonFilter} onChange={setFieldReasonFilter} />}
         <select value={sevFilter} onChange={e => setSevFilter(e.target.value)}>
           <option value="all">All severities</option>
           <option>Critical</option><option>High</option><option>Medium</option><option>Low</option>
@@ -327,7 +331,7 @@ export default function App() {
         </select>
       </div>
 
-      {cfg.combined && (
+      {cfg.combined && data.epic.length > 0 && (
         <PhaseTable
           cfg={cfg} rows={data.epic} reasonFilter={reasonFilter} sevFilter={sevFilter}
           sortAsc={sortAsc} setSortAsc={setSortAsc} expandedKey={expandedKey} setExpandedKey={setExpandedKey}
@@ -336,7 +340,7 @@ export default function App() {
           title="Phase mismatches" jiraBase={jiraBase} summaries={summaries} scrumTeams={scrumTeams} scrumTeamFilter={scrumTeamFilter} onTitleClick={openTitleModal}
         />
       )}
-      {!cfg.combined && !cfg.fieldTab && !cfg.outcomeCombined && (
+      {!cfg.combined && !cfg.fieldTab && !cfg.outcomeCombined && data[currentTab].length > 0 && (
         <PhaseTable
           cfg={cfg} rows={data[currentTab]} reasonFilter={reasonFilter} sevFilter={sevFilter}
           sortAsc={sortAsc} setSortAsc={setSortAsc} expandedKey={expandedKey} setExpandedKey={setExpandedKey}
@@ -345,7 +349,7 @@ export default function App() {
           title={'Non-compliant ' + currentTab + 's'} jiraBase={jiraBase} summaries={summaries} scrumTeams={scrumTeams} scrumTeamFilter={scrumTeamFilter} onTitleClick={openTitleModal}
         />
       )}
-      {cfg.fieldTab && (
+      {cfg.fieldTab && data.cr.length > 0 && (
         <FieldTable
           findings={data.cr} reasonFilter={reasonFilter} sevFilter={sevFilter}
           entityType="cr" expandedKey={expandedKey} setExpandedKey={setExpandedKey}
@@ -353,9 +357,9 @@ export default function App() {
           title="Non-compliant CRs" jiraBase={jiraBase} summaries={summaries} scrumTeams={scrumTeams} scrumTeamFilter={scrumTeamFilter} onTitleClick={openTitleModal}
         />
       )}
-      {cfg.combined && (
+      {cfg.combined && data.epicFields.length > 0 && (
         <FieldTable
-          findings={data.epicFields} reasonFilter="all" sevFilter="all"
+          findings={data.epicFields} reasonFilter={fieldReasonFilter} sevFilter={sevFilter}
           entityType="epic" expandedKey={epicFieldsExpandedKey} setExpandedKey={setEpicFieldsExpandedKey}
           onDraft={draftFieldComment} fieldCache={fieldCache} onSaved={loadAll}
           title="Field issues" jiraBase={jiraBase} summaries={summaries} scrumTeams={scrumTeams} scrumTeamFilter={scrumTeamFilter} onTitleClick={openTitleModal}
@@ -363,26 +367,26 @@ export default function App() {
       )}
       {cfg.outcomeCombined && (
         <>
-          <PhaseTable
+          {data.outcomeEpic.length > 0 && <PhaseTable
             cfg={OUTCOME_EPIC_CFG} rows={data.outcomeEpic} reasonFilter={reasonFilter} sevFilter={sevFilter}
             sortAsc={sortAsc} setSortAsc={setSortAsc} expandedKey={expandedKey} setExpandedKey={setExpandedKey}
             onResolve={resolveRow} onDraft={draftPhaseComment} onStatusChange={openStatusBox}
             statusChange={statusChange} onApplyStatus={applyStatusChange} onSelectTransition={selectTransition} onCloseStatus={() => setStatusChange(null)}
             title="Epic phase mismatches" jiraBase={jiraBase} summaries={summaries} scrumTeams={scrumTeams} scrumTeamFilter={scrumTeamFilter} onTitleClick={openTitleModal}
-          />
-          <PhaseTable
+          />}
+          {data.outcome.length > 0 && <PhaseTable
             cfg={cfg} rows={data.outcome} reasonFilter={reasonFilter} sevFilter={sevFilter}
             sortAsc={sortAsc} setSortAsc={setSortAsc} expandedKey={expandedKey} setExpandedKey={setExpandedKey}
             onResolve={resolveRow} onDraft={draftPhaseComment} onStatusChange={openStatusBox}
             statusChange={statusChange} onApplyStatus={applyStatusChange} onSelectTransition={selectTransition} onCloseStatus={() => setStatusChange(null)}
             title="Story phase mismatches" jiraBase={jiraBase} summaries={summaries} scrumTeams={scrumTeams} scrumTeamFilter={scrumTeamFilter} onTitleClick={openTitleModal}
-          />
-          <FieldTable
-            findings={data.outcomeFields} reasonFilter="all" sevFilter="all"
+          />}
+          {data.outcomeFields.length > 0 && <FieldTable
+            findings={data.outcomeFields} reasonFilter={fieldReasonFilter} sevFilter={sevFilter}
             entityType="outcome" expandedKey={outcomeFieldsExpandedKey} setExpandedKey={setOutcomeFieldsExpandedKey}
             onDraft={draftFieldComment} fieldCache={fieldCache} onSaved={loadAll}
             title="Field issues" jiraBase={jiraBase} summaries={summaries} scrumTeams={scrumTeams} scrumTeamFilter={scrumTeamFilter} onTitleClick={openTitleModal}
-          />
+          />}
         </>
       )}
 
@@ -430,14 +434,50 @@ export default function App() {
 
 function ReasonFilter({ tab, data, value, onChange }) {
   const cfg = TABS[tab]
-  const values = cfg.fieldTab
-    ? [...new Set(data.cr.map(f => f.field).filter(Boolean))]
-    : [...new Set((cfg.combined ? data.epic : data[tab]).map(cfg.getRows).map(r => r.reason).filter(Boolean))]
+  let values
+  if (cfg.fieldTab) {
+    values = [...new Set(data.cr.map(f => f.field).filter(Boolean))]
+  } else if (cfg.combined) {
+    values = [...new Set(data.epic.map(cfg.getRows).map(r => r.reason).filter(Boolean))]
+  } else if (cfg.outcomeCombined) {
+    const epicPhaseReasons = data.outcomeEpic.map(OUTCOME_EPIC_CFG.getRows).map(r => r.reason).filter(Boolean)
+    const storyPhaseReasons = data.outcome.map(cfg.getRows).map(r => r.reason).filter(Boolean)
+    values = [...new Set([...epicPhaseReasons, ...storyPhaseReasons])]
+  } else {
+    values = [...new Set(data[tab].map(cfg.getRows).map(r => r.reason).filter(Boolean))]
+  }
   return (
     <select value={value} onChange={e => onChange(e.target.value)}>
       <option value="all">All reasons</option>
       {values.map(v => <option key={v} value={v}>{v}</option>)}
     </select>
+  )
+}
+
+function FieldReasonFilter({ findings, value, onChange }) {
+  const values = [...new Set(findings.map(f => f.field).filter(Boolean))]
+  return (
+    <select value={value} onChange={e => onChange(e.target.value)}>
+      <option value="all">All field issues</option>
+      {values.map(v => <option key={v} value={v}>{v}</option>)}
+    </select>
+  )
+}
+
+const PAGE_SIZE = 25
+
+function Pagination({ page, setPage, totalItems, pageSize = PAGE_SIZE }) {
+  const totalPages = Math.max(1, Math.ceil(totalItems / pageSize))
+  if (totalPages <= 1) return null
+  const start = (page - 1) * pageSize + 1
+  const end = Math.min(page * pageSize, totalItems)
+  return (
+    <div className="pagination">
+      <span className="pagination-info">{start}–{end} of {totalItems}</span>
+      <button onClick={() => setPage(p => Math.max(1, p - 1))} disabled={page === 1}>Previous</button>
+      <span className="pagination-page">Page {page} of {totalPages}</span>
+      <button onClick={() => setPage(p => Math.min(totalPages, p + 1))} disabled={page === totalPages}>Next</button>
+    </div>
   )
 }
 
@@ -518,6 +558,10 @@ function PhaseTable({ cfg, rows, reasonFilter, sevFilter, sortAsc, setSortAsc, e
     .filter(r => scrumTeamFilter === 'all' || scrumTeams[r.leftKey] === scrumTeamFilter || scrumTeams[r.rightKey] === scrumTeamFilter)
     .sort((a, b) => sortAsc ? (a.score || 0) - (b.score || 0) : (b.score || 0) - (a.score || 0))
 
+  const [page, setPage] = useState(1)
+  useEffect(() => { setPage(1) }, [reasonFilter, sevFilter, scrumTeamFilter, rows])
+  const pageRows = filtered.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE)
+
   const isTargetLeft = cfg.dependentSide !== 'right'
 
   return (
@@ -538,7 +582,7 @@ function PhaseTable({ cfg, rows, reasonFilter, sevFilter, sortAsc, setSortAsc, e
           {filtered.length === 0 && (
             <tr><td colSpan={cfg.hasActions ? 7 : 6} className="empty">No mismatches match these filters.</td></tr>
           )}
-          {filtered.map(d => {
+          {pageRows.map(d => {
             const targetKey = isTargetLeft ? d.leftKey : d.rightKey
             const targetStatus = isTargetLeft ? d.leftStatus : d.rightStatus
             const otherKey = isTargetLeft ? d.rightKey : d.leftKey
@@ -612,6 +656,7 @@ function PhaseTable({ cfg, rows, reasonFilter, sevFilter, sortAsc, setSortAsc, e
           })}
         </tbody>
       </table>
+      <Pagination page={page} setPage={setPage} totalItems={filtered.length} />
     </div>
   )
 }
@@ -631,6 +676,10 @@ function FieldTable({ findings, reasonFilter, sevFilter, entityType, expandedKey
   const groupList = Object.values(groups).sort((a, b) => b.maxRank - a.maxRank)
   const entityLabel = { epic: 'Epic', outcome: 'Outcome' }[entityType] || 'CR'
 
+  const [page, setPage] = useState(1)
+  useEffect(() => { setPage(1) }, [reasonFilter, sevFilter, scrumTeamFilter, findings])
+  const pageGroups = groupList.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE)
+
   return (
     <div className="table-wrap">
       <div className="table-header"><p>{title}</p></div>
@@ -639,7 +688,7 @@ function FieldTable({ findings, reasonFilter, sevFilter, entityType, expandedKey
         <thead><tr><th>{entityLabel}</th><th>Status</th><th>Severity</th><th>Issues</th><th>Actions</th><th></th></tr></thead>
         <tbody>
           {groupList.length === 0 && <tr><td colSpan={6} className="empty">No findings.</td></tr>}
-          {groupList.map(g => {
+          {pageGroups.map(g => {
             const isOpen = expandedKey === g.key
             return (
               <React.Fragment key={g.key}>
@@ -660,6 +709,7 @@ function FieldTable({ findings, reasonFilter, sevFilter, entityType, expandedKey
           })}
         </tbody>
       </table>
+      <Pagination page={page} setPage={setPage} totalItems={groupList.length} />
     </div>
   )
 }
