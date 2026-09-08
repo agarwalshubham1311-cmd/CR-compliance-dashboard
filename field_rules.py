@@ -23,20 +23,20 @@ CR_FIELDS = {
 }
 
 OUTCOME_FIELDS = {
-    "target_delivery_date": "customfield_10112",
-    "rag_status": "customfield_10114",
-    "rag_outcome": "customfield_10115",
-    "go_live_date": "customfield_10116",
+    "target_delivery_date": "customfield_18103",
+    "rag_status": "customfield_10602",
+    "rag_outcome": "customfield_15407",
+    "go_live_date": "customfield_19702",
 }
 
 EPIC_FIELDS = {
     "due_date": "duedate",
-    "target_delivery_date": "customfield_10184",  # Epic's OWN field — distinct from CR/Outcome's customfield_10112
+    "target_delivery_date": "customfield_18103",  # Epic's OWN field — distinct from CR/Outcome's customfield_10112
     "description": "description",
     "labels": "labels",
     "priority": "priority",
     "pi": "customfield_10183",
-    "delivery_data_confidence": "customfield_10185",
+    "delivery_data_confidence": "customfield_21663",
 }
 
 # Human-readable labels for each field key, used by the /api/entities/*

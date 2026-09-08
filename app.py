@@ -9,7 +9,7 @@ from mcp.client.sse import sse_client
 app = Flask(__name__, static_folder="static", static_url_path="")
 
 # URL of the jira-mcp container's SSE endpoint (set MCP_SERVER_URL env var to override)
-MCP_SERVER_URL = os.environ.get("MCP_SERVER_URL", "http://localhost:8000/sse")
+MCP_SERVER_URL = os.environ.get("MCP_SERVER_URL", "http://jira-mcp:8000/sse")
 
 import db as compliance_db
 import compliance as compliance_rules
@@ -540,14 +540,13 @@ def cr_mismatches():
 # no board clause), so linked results get their own explicit membership
 # check too, using the same allowed_keys set.
 ALLOWED_BOARD_NAMES = [b.strip() for b in os.environ.get("ALLOWED_BOARD_NAMES", "ACC,ACBD").split(",") if b.strip()]
-
-CR_DISCOVERY_JQL = os.environ.get("CR_DISCOVERY_JQL", 'issuetype = "Change Request"')
+CR_DISCOVERY_JQL = 'filter = Asylum_CRs'
+EPIC_DISCOVERY_JQL = 'filter = Asylum_Epics'
+OUTCOME_DISCOVERY_JQL = 'filter = Asylum_Outcomes'
 
 # Scrum Team is a filter dimension, not a mandatory field check, so it
 # lives here rather than in field_rules.py's CR/EPIC/OUTCOME_FIELDS.
 SCRUM_TEAM_FIELD_ID = os.environ.get("SCRUM_TEAM_FIELD_ID", "customfield_21304")
-OUTCOME_DISCOVERY_JQL = os.environ.get("OUTCOME_DISCOVERY_JQL", 'issuetype = "Outcome"')
-EPIC_DISCOVERY_JQL = os.environ.get("EPIC_DISCOVERY_JQL", 'issuetype = "Epic"')
 
 
 def _get_allowed_issue_keys(board_id=None, project_key=None):
@@ -602,7 +601,7 @@ def _get_allowed_issue_keys(board_id=None, project_key=None):
 CONCURRENT_FETCH_LIMIT = int(os.environ.get("CONCURRENT_FETCH_LIMIT", 8))
 
 
-async def _search_all_issues(session, jql, max_pages=50):
+async def _search_all_issues11(session, jql, max_pages=250):
     """jira_search only returns one page by default, which silently
     truncates results on any query returning more than a page's worth —
     a real correctness bug at 10k+ record scale, not just a performance
@@ -632,7 +631,38 @@ async def _search_all_issues(session, jql, max_pages=50):
             break
     return all_issues
 
-
+async def _search_all_issues(session, jql, max_pages=250):
+    """jira_search paginates via start_at (NOT page_token — that's a
+    Cloud-only mechanism per the tool's own schema; this Jira instance
+    is Server/DC, which requires start_at). limit (not max_results,
+    which the tool schema rejects) controls page size, capped at 50 by
+    the tool itself. Loops using start_at + the reported total until
+    every matching issue is collected, or max_pages as a safety cap."""
+    import json as _json
+    all_issues = []
+    total = None
+    for _ in range(max_pages):
+        args = {"jql": jql, "limit": 50}
+        if all_issues:
+            args["start_at"] = len(all_issues)
+        result = await session.call_tool("jira_search", args)
+        page_issues = []
+        for block in [b.model_dump() for b in result.content]:
+            text = block.get("text")
+            if not text:
+                continue
+            try:
+                parsed = _json.loads(text)
+                page_issues = parsed.get("issues", [])
+                total = parsed.get("total")
+            except Exception:
+                pass
+        if not page_issues:
+            break
+        all_issues.extend(page_issues)
+        if total is not None and len(all_issues) >= total:
+            break
+    return all_issues
 async def _discover_issues(session, base_jql, project_key=None, board_id=None):
     """Finds issues matching base_jql (a type/label filter, e.g.
     CR_DISCOVERY_JQL), optionally narrowed to one board or one project.
@@ -648,16 +678,16 @@ async def _discover_issues(session, base_jql, project_key=None, board_id=None):
 
     board_id takes priority if both are somehow set, since a board
     already implies a specific project."""
-    if board_id:
+    """ if board_id:
         return await asyncio.to_thread(jira_rest.search_board_issues, board_id, base_jql)
     if project_key:
         scoped_jql = f'project = "{project_key}" AND ({base_jql})'
-        return await _search_all_issues(session, scoped_jql)
+        return await _search_all_issues(session, scoped_jql) """
     return await _search_all_issues(session, base_jql)
 
 
 async def _linked_issues_concurrent(session, keys, limit=None):
-    """Finds linked issues for multiple entities (CRs or Outcomes)
+    """Finds linked issue_search_all_issuess for multiple entities (CRs or Outcomes)
     concurrently instead of one sequential MCP round-trip per entity —
     confirmed as the dominant cost in scan time at any real scale (each
     linkedIssues() search is a full network round-trip to Jira; 9
@@ -761,6 +791,11 @@ async def _run_full_scan(project_key=None, board_id=None):
     )
     print("DEBUG MCP_SERVER_URL =", repr(MCP_SERVER_URL), flush=True)
 
+    # Clear all old scan data to ensure fresh results each time
+    #cleared = compliance_db.clear_all_scan_data()
+    #app.logger.info("[scan] Cleared %d old scan runs to start fresh", cleared["cleared_runs"])
+    #print(f"[scan] cleared {cleared['cleared_runs']} old runs for fresh data")
+
     async with sse_client(MCP_SERVER_URL) as (read, write):
         async with ClientSession(read, write) as session:
             await session.initialize()
@@ -776,7 +811,7 @@ async def _run_full_scan(project_key=None, board_id=None):
                 project_key,
                 board_id,
             )
-            crs = [c for c in crs if c.get("key") in allowed_keys]
+            crs = [c for c in crs]
             app.logger.info(
                 "[scan] CRs after board/allowed filtering: %d (allowed_keys count=%d)",
                 len(crs),
@@ -856,7 +891,7 @@ async def _run_full_scan(project_key=None, board_id=None):
                 project_key,
                 board_id,
             )
-            epics = [e for e in epics if e.get("key") in allowed_keys]
+            epics = [e for e in epics]
             app.logger.info("[scan] Epics after board/allowed filtering: %d", len(epics))
             issue_summaries.update({e.get("key"): e.get("summary") for e in epics})
             print(f"[scan] discovered {len(epics)} Epics, fetching field data concurrently...")
@@ -906,8 +941,9 @@ async def _run_full_scan(project_key=None, board_id=None):
                 project_key,
                 board_id,
             )
-            outcomes = [o for o in outcomes if o.get("key") in allowed_keys]
+            outcomes = [o for o in outcomes]
             app.logger.info("[scan] Outcomes after board/allowed filtering: %d", len(outcomes))
+
             issue_summaries.update({o.get("key"): o.get("summary") for o in outcomes})
             print(f"[scan] discovered {len(outcomes)} Outcomes, fetching field data concurrently...")
             outcome_raw_by_key = await _fetch_raw_concurrent([o.get("key") for o in outcomes])
@@ -1344,12 +1380,12 @@ def dashboard_unresolve():
 # Scheduler: re-run the full scan on an interval so the dashboard reflects
 # near-real-time state without the user manually clicking refresh.
 # ---------------------------------------------------------------------------
-def start_scheduler():
+def start_scheduler1():
     from apscheduler.schedulers.background import BackgroundScheduler
     interval_minutes = int(os.environ.get("SCAN_INTERVAL_MINUTES", 15))
     retention_days = int(os.environ.get("RETENTION_DAYS", 7))
 
-    def scan_and_prune():
+    def scan_and_prune1():
         run_async(_run_full_scan())
         pruned = compliance_db.prune_old_runs(keep_days=retention_days)
         if pruned["pruned_runs"] > 0:
@@ -1363,7 +1399,62 @@ def start_scheduler():
     scan_and_prune()
     return scheduler
 
+def start_scheduler():
+    from apscheduler.schedulers.background import BackgroundScheduler
 
+    interval_minutes = int(os.environ.get("SCAN_INTERVAL_MINUTES", 15))
+    retention_days = int(os.environ.get("RETENTION_DAYS", 7))
+
+    def scan_and_prune():
+        try:
+            print("[scheduler] Starting scheduled scan...")
+            run_async(_run_full_scan())
+
+            pruned = compliance_db.prune_old_runs(
+                keep_days=retention_days
+            )
+
+            if pruned["pruned_runs"] > 0:
+                print(
+                    f"[retention] pruned "
+                    f"{pruned['pruned_runs']} runs older than "
+                    f"{retention_days} days"
+                )
+
+        except Exception as e:
+            app.logger.exception(
+                "[scheduler] Scan failed: %s", e
+            )
+
+    scheduler = BackgroundScheduler()
+
+    scheduler.add_job(
+        scan_and_prune,
+        "interval",
+        minutes=interval_minutes,
+        id="compliance_scan",
+        replace_existing=True,
+    )
+
+    scheduler.add_job(
+        compliance_db.vacuum,
+        "interval",
+        hours=24,
+        id="database_vacuum",
+        replace_existing=True,
+    )
+
+    scheduler.start()
+
+    # IMPORTANT:
+    # Do NOT run scan_and_prune() here.
+    # The first scan will happen after SCAN_INTERVAL_MINUTES.
+    print(
+        f"[scheduler] Started. First scan in "
+        f"{interval_minutes} minutes."
+    )
+
+    return scheduler
 # ---------------------------------------------------------------------------
 # AI layer: draft a remediation comment via a local LLM (Ollama). This never
 # writes to Jira on its own — it only returns text for a human to review.
@@ -1456,6 +1547,8 @@ def dashboard():
 
 
 if __name__ == "__main__":
+    #start_scheduler()
+
     # avoid starting the scheduler twice under Flask's debug reloader
     #if os.environ.get("WERKZEUG_RUN_MAIN") != "true" and not app.debug:
         #start_scheduler()
@@ -1466,4 +1559,9 @@ if __name__ == "__main__":
     # get serialized one at a time server-side, adding their individual
     # latencies together instead of overlapping. This was the actual
     # cause of "scan finishes fine, but the display update lags."
-    app.run(host="0.0.0.0", port=5000, debug=True, threaded=True)
+    app.run(
+        host="0.0.0.0",
+        port=5000,
+        debug=True,
+        threaded=True
+    )
