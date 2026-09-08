@@ -9,9 +9,9 @@ import datetime
 import re
 
 CR_FIELDS = {
-    "epic_link": "customfield_10014",
-    "complexity": "customfield_10109",
-    "funded_by": "customfield_10106",
+    "epic_link": "customfield_10006",
+    "complexity": "customfield_15904",
+    "funded_by": "customfield_20702",
     "baseline_target_delivery_date": "customfield_10110",
     "baseline_prp_date": "customfield_10108",
     "actual_prp_start_date": "customfield_28402",
@@ -23,20 +23,20 @@ CR_FIELDS = {
 }
 
 OUTCOME_FIELDS = {
-    "target_delivery_date": "customfield_10112",
-    "rag_status": "customfield_10114",
-    "rag_outcome": "customfield_10115",
-    "go_live_date": "customfield_10116",
+    "target_delivery_date": "customfield_18103",
+    "rag_status": "customfield_10602",
+    "rag_outcome": "customfield_15407",
+    "go_live_date": "customfield_19702",
 }
 
 EPIC_FIELDS = {
     "due_date": "duedate",
-    "target_delivery_date": "customfield_10184",  # Epic's OWN field — distinct from CR/Outcome's customfield_10112
+    "target_delivery_date": "customfield_18103",  # Epic's OWN field — distinct from CR/Outcome's customfield_10112
     "description": "description",
     "labels": "labels",
     "priority": "priority",
     "pi": "customfield_10183",
-    "delivery_data_confidence": "customfield_10185",
+    "delivery_data_confidence": "customfield_21663",
 }
 
 # Human-readable labels for each field key, used by the /api/entities/*

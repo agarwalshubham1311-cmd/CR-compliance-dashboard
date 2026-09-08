@@ -136,7 +136,15 @@ export default function App() {
     setIsLoadingBoards(true)
     setSelectedBoardId('')
     const result = await fetchJSON(`/api/jira/boards?project_key=${encodeURIComponent(projectKey)}`)
-    setBoards(result.error ? [] : (result.items || []))
+    if (!result.error) {
+      setBoards(result.items || [])
+      // Auto-select 'ACC' board if project key is 'ACC' and default board is available
+      if (projectKey && projectKey.toUpperCase() === 'ACC' && result.default_board_id) {
+        setSelectedBoardId(result.default_board_id)
+      }
+    } else {
+      setBoards([])
+    }
     setIsLoadingBoards(false)
   }
 

@@ -562,3 +562,20 @@ def get_issue_scrum_teams(keys=None):
         rows = conn.execute("SELECT issue_key, scrum_team FROM issue_scrum_teams").fetchall()
     conn.close()
     return {r["issue_key"]: r["scrum_team"] for r in rows}
+
+
+def clear_all_scan_data():
+    """Delete ALL scan runs and results (checks, field_findings) to start fresh.
+    Preserves status_mappings and resolutions as they represent learned/human state.
+    Called at the start of each scan to ensure fresh data without duplicates."""
+    conn = get_conn()
+    # Get all run IDs
+    all_run_ids = [r[0] for r in conn.execute("SELECT run_id FROM runs")]
+    if all_run_ids:
+        placeholders = ",".join("?" * len(all_run_ids))
+        conn.execute(f"DELETE FROM checks WHERE run_id IN ({placeholders})", all_run_ids)
+        conn.execute(f"DELETE FROM field_findings WHERE run_id IN ({placeholders})", all_run_ids)
+        conn.execute(f"DELETE FROM runs WHERE run_id IN ({placeholders})", all_run_ids)
+        conn.commit()
+    conn.close()
+    return {"cleared_runs": len(all_run_ids)}

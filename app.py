@@ -9,7 +9,7 @@ from mcp.client.sse import sse_client
 app = Flask(__name__, static_folder="static", static_url_path="")
 
 # URL of the jira-mcp container's SSE endpoint (set MCP_SERVER_URL env var to override)
-MCP_SERVER_URL = os.environ.get("MCP_SERVER_URL", "http://localhost:8000/sse")
+MCP_SERVER_URL = os.environ.get("MCP_SERVER_URL", "http://jira-mcp:8000/sse")
 
 import db as compliance_db
 import compliance as compliance_rules
@@ -540,8 +540,9 @@ def cr_mismatches():
 # no board clause), so linked results get their own explicit membership
 # check too, using the same allowed_keys set.
 ALLOWED_BOARD_NAMES = [b.strip() for b in os.environ.get("ALLOWED_BOARD_NAMES", "ACC,ACBD").split(",") if b.strip()]
-
-CR_DISCOVERY_JQL = os.environ.get("CR_DISCOVERY_JQL", 'issuetype = "Change Request"')
+CR_DISCOVERY_JQL = 'filter = Asylum_CRs'
+EPIC_DISCOVERY_JQL = 'filter = Asylum_Epics'
+OUTCOME_DISCOVERY_JQL = 'filter = Asylum_Outcomes'
 
 # Scrum Team is a filter dimension, not a mandatory field check, so it
 # lives here rather than in field_rules.py's CR/EPIC/OUTCOME_FIELDS.
@@ -553,29 +554,50 @@ SCRUM_TEAM_FIELD_ID = os.environ.get("SCRUM_TEAM_FIELD_ID", "customfield_21304")
 # those weren't touched in this pass.
 EPIC_LINK_FIELD_ID = os.environ.get("EPIC_LINK_FIELD_ID", "customfield_10006")
 PARENT_LINK_FIELD_ID = os.environ.get("PARENT_LINK_FIELD_ID", "customfield_14701")
-OUTCOME_DISCOVERY_JQL = os.environ.get("OUTCOME_DISCOVERY_JQL", 'issuetype = "Outcome"')
-EPIC_DISCOVERY_JQL = os.environ.get("EPIC_DISCOVERY_JQL", 'issuetype = "Epic"')
 
 
-def _get_allowed_issue_keys():
-    """Every issue key currently on any board named in ALLOWED_BOARD_NAMES
-    (ACC, ACBD by default) — the actual source of truth for scoping the
-    scan, since board membership isn't something JQL can filter on
-    directly (unlike a project, boards aren't encoded in the issue key
-    either, so this has to be a real membership lookup, not a JQL clause
-    or a key-prefix check). Synchronous (jira_rest uses `requests`) —
-    callers should run this via asyncio.to_thread."""
-    all_boards = jira_rest.get_boards()
-    matching_boards = [b for b in all_boards if b.get("name") in ALLOWED_BOARD_NAMES]
-    if not matching_boards:
-        print(f"[scan] WARNING: no boards found matching {ALLOWED_BOARD_NAMES} — "
-              f"check the exact board names in Jira, or set ALLOWED_BOARD_NAMES to override.")
-        return set()
+def _get_allowed_issue_keys(board_id=None, project_key=None):
+    """Every issue key currently on the specified board or boards in ALLOWED_BOARD_NAMES.
+
+    - If board_id is provided: fetch issues only from that specific board
+    - If project_key is provided: fetch issues from all boards matching that project
+    - Otherwise: fetch issues from all boards matching ALLOWED_BOARD_NAMES
+
+    The board membership is the actual source of truth for scoping the scan, since
+    board membership isn't something JQL can filter on directly (unlike a project,
+    boards aren't encoded in the issue key either, so this has to be a real membership
+    lookup, not a JQL clause or a key-prefix check).
+
+    Synchronous (jira_rest uses `requests`) — callers should run this via asyncio.to_thread."""
 
     allowed_keys = set()
-    for board in matching_boards:
-        issues = jira_rest.search_board_issues(board["id"])
+
+    if board_id:
+        # Fetch issues from the specific selected board only
+        print(f"[scan] fetching issues from selected board {board_id}...")
+        issues = jira_rest.search_board_issues(board_id)
         allowed_keys.update(i.get("key") for i in issues if i.get("key"))
+        print(f"[scan] found {len(allowed_keys)} issues on board {board_id}")
+    else:
+        # Fetch issues from all allowed boards
+        all_boards = jira_rest.get_boards(project_key=project_key)
+        # Filter to only boards in ALLOWED_BOARD_NAMES
+        matching_boards = [b for b in all_boards if b.get("name") in ALLOWED_BOARD_NAMES]
+
+        if not matching_boards:
+            if project_key:
+                print(f"[scan] WARNING: no boards found for project {project_key} matching {ALLOWED_BOARD_NAMES} — "
+                      f"check the exact board names in Jira, or set ALLOWED_BOARD_NAMES to override.")
+            else:
+                print(f"[scan] WARNING: no boards found matching {ALLOWED_BOARD_NAMES} — "
+                      f"check the exact board names in Jira, or set ALLOWED_BOARD_NAMES to override.")
+            return set()
+
+        print(f"[scan] fetching issues from {len(matching_boards)} allowed boards...")
+        for board in matching_boards:
+            issues = jira_rest.search_board_issues(board["id"])
+            allowed_keys.update(i.get("key") for i in issues if i.get("key"))
+
     return allowed_keys
 
 # How many direct-REST fetches (jira_rest.get_issue_raw) run concurrently.
@@ -586,7 +608,7 @@ def _get_allowed_issue_keys():
 CONCURRENT_FETCH_LIMIT = int(os.environ.get("CONCURRENT_FETCH_LIMIT", 8))
 
 
-async def _search_all_issues(session, jql, max_pages=50):
+async def _search_all_issues11(session, jql, max_pages=250):
     """jira_search only returns one page by default, which silently
     truncates results on any query returning more than a page's worth —
     a real correctness bug at 10k+ record scale, not just a performance
@@ -616,7 +638,38 @@ async def _search_all_issues(session, jql, max_pages=50):
             break
     return all_issues
 
-
+async def _search_all_issues(session, jql, max_pages=250):
+    """jira_search paginates via start_at (NOT page_token — that's a
+    Cloud-only mechanism per the tool's own schema; this Jira instance
+    is Server/DC, which requires start_at). limit (not max_results,
+    which the tool schema rejects) controls page size, capped at 50 by
+    the tool itself. Loops using start_at + the reported total until
+    every matching issue is collected, or max_pages as a safety cap."""
+    import json as _json
+    all_issues = []
+    total = None
+    for _ in range(max_pages):
+        args = {"jql": jql, "limit": 50}
+        if all_issues:
+            args["start_at"] = len(all_issues)
+        result = await session.call_tool("jira_search", args)
+        page_issues = []
+        for block in [b.model_dump() for b in result.content]:
+            text = block.get("text")
+            if not text:
+                continue
+            try:
+                parsed = _json.loads(text)
+                page_issues = parsed.get("issues", [])
+                total = parsed.get("total")
+            except Exception:
+                pass
+        if not page_issues:
+            break
+        all_issues.extend(page_issues)
+        if total is not None and len(all_issues) >= total:
+            break
+    return all_issues
 async def _discover_issues(session, base_jql, project_key=None, board_id=None):
     """Finds issues matching base_jql (a type/label filter, e.g.
     CR_DISCOVERY_JQL), optionally narrowed to one board or one project.
@@ -632,16 +685,16 @@ async def _discover_issues(session, base_jql, project_key=None, board_id=None):
 
     board_id takes priority if both are somehow set, since a board
     already implies a specific project."""
-    if board_id:
+    """ if board_id:
         return await asyncio.to_thread(jira_rest.search_board_issues, board_id, base_jql)
     if project_key:
         scoped_jql = f'project = "{project_key}" AND ({base_jql})'
-        return await _search_all_issues(session, scoped_jql)
+        return await _search_all_issues(session, scoped_jql) """
     return await _search_all_issues(session, base_jql)
 
 
 async def _linked_issues_concurrent(session, keys, limit=None):
-    """Finds linked issues for multiple entities (CRs or Outcomes)
+    """Finds linked issue_search_all_issuess for multiple entities (CRs or Outcomes)
     concurrently instead of one sequential MCP round-trip per entity —
     confirmed as the dominant cost in scan time at any real scale (each
     linkedIssues() search is a full network round-trip to Jira; 9
@@ -769,16 +822,39 @@ async def _run_full_scan(project_key=None, board_id=None):
     issue_summaries = {}  # issue_key -> summary/title, collected from every discovery point below
     issue_scrum_teams = {}  # issue_key -> Scrum Team value, collected from CR/Epic/Outcome raw data
 
+    app.logger.info(
+        "[scan] Starting full scan: project_key=%s board_id=%s",
+        project_key,
+        board_id,
+    )
+    print("DEBUG MCP_SERVER_URL =", repr(MCP_SERVER_URL), flush=True)
+
+    # Clear all old scan data to ensure fresh results each time
+    #cleared = compliance_db.clear_all_scan_data()
+    #app.logger.info("[scan] Cleared %d old scan runs to start fresh", cleared["cleared_runs"])
+    #print(f"[scan] cleared {cleared['cleared_runs']} old runs for fresh data")
+
     async with sse_client(MCP_SERVER_URL) as (read, write):
         async with ClientSession(read, write) as session:
             await session.initialize()
 
-            print(f"[scan] fetching board membership for {ALLOWED_BOARD_NAMES}...")
-            allowed_keys = await asyncio.to_thread(_get_allowed_issue_keys)
-            print(f"[scan] {len(allowed_keys)} issue keys currently on allowed boards")
+            print(f"[scan] fetching board membership...")
+            allowed_keys = await asyncio.to_thread(_get_allowed_issue_keys, board_id, project_key)
+            print(f"[scan] {len(allowed_keys)} issue keys to process")
 
             crs = await _discover_issues(session, CR_DISCOVERY_JQL, project_key, board_id)
-            crs = [c for c in crs if c.get("key") in allowed_keys]
+            app.logger.info(
+                "[scan] Discovered %d CRs before board filtering (project=%s board_id=%s)",
+                len(crs),
+                project_key,
+                board_id,
+            )
+            crs = [c for c in crs]
+            app.logger.info(
+                "[scan] CRs after board/allowed filtering: %d (allowed_keys count=%d)",
+                len(crs),
+                len(allowed_keys),
+            )
             issue_summaries.update({c.get("key"): c.get("summary") for c in crs})
             print(f"[scan] discovered {len(crs)} CRs, fetching field data concurrently...")
             cr_raw_by_key = await _fetch_raw_concurrent([cr.get("key") for cr in crs])
@@ -870,7 +946,14 @@ async def _run_full_scan(project_key=None, board_id=None):
 
             # Epic <- CR bottleneck check, using the Epic Links collected above.
             epics = await _discover_issues(session, EPIC_DISCOVERY_JQL, project_key, board_id)
-            epics = [e for e in epics if e.get("key") in allowed_keys]
+            app.logger.info(
+                "[scan] Discovered %d Epics before board filtering (project=%s board_id=%s)",
+                len(epics),
+                project_key,
+                board_id,
+            )
+            epics = [e for e in epics]
+            app.logger.info("[scan] Epics after board/allowed filtering: %d", len(epics))
             issue_summaries.update({e.get("key"): e.get("summary") for e in epics})
             print(f"[scan] discovered {len(epics)} Epics, fetching field data concurrently...")
             epic_raw_by_key = await _fetch_raw_concurrent([epic.get("key") for epic in epics])
@@ -919,7 +1002,15 @@ async def _run_full_scan(project_key=None, board_id=None):
 
             # Outcome field-completeness + Story <- Outcome phase alignment
             outcomes = await _discover_issues(session, OUTCOME_DISCOVERY_JQL, project_key, board_id)
-            outcomes = [o for o in outcomes if o.get("key") in allowed_keys]
+            app.logger.info(
+                "[scan] Discovered %d Outcomes before board filtering (project=%s board_id=%s)",
+                len(outcomes),
+                project_key,
+                board_id,
+            )
+            outcomes = [o for o in outcomes]
+            app.logger.info("[scan] Outcomes after board/allowed filtering: %d", len(outcomes))
+
             issue_summaries.update({o.get("key"): o.get("summary") for o in outcomes})
             print(f"[scan] discovered {len(outcomes)} Outcomes, fetching field data concurrently...")
             outcome_raw_by_key = await _fetch_raw_concurrent([o.get("key") for o in outcomes])
@@ -1278,9 +1369,12 @@ def dashboard_refresh():
 @app.route("/api/config", methods=["GET"])
 def get_frontend_config():
     jira_url = os.environ.get("JIRA_URL", "").rstrip("/")
+    # Default to 'ACC' project if DEFAULT_PROJECT_KEY is not explicitly set
+    default_project = os.environ.get("DEFAULT_PROJECT_KEY", "ACC")
+    app.logger.info("Frontend config: jira_url=%s default_project_key=%s", jira_url, default_project)
     return jsonify({
         "jira_base": f"{jira_url}/browse/" if jira_url else "",
-        "default_project_key": os.environ.get("DEFAULT_PROJECT_KEY", ""),
+        "default_project_key": default_project,
     })
 
 
@@ -1302,7 +1396,7 @@ def list_boards():
         return jsonify({"error": f"Could not fetch boards: {e}"}), 500
     # Dropdown only ever offers the same boards the scan is restricted to
     # (ALLOWED_BOARD_NAMES) — never a choice that would return nothing.
-    boards = [b for b in boards if b.get("name") in ALLOWED_BOARD_NAMES]
+    #boards = [b for b in boards if b.get("name") in ALLOWED_BOARD_NAMES]
     return jsonify({"items": boards})
 
 
@@ -1353,12 +1447,12 @@ def dashboard_unresolve():
 # Scheduler: re-run the full scan on an interval so the dashboard reflects
 # near-real-time state without the user manually clicking refresh.
 # ---------------------------------------------------------------------------
-def start_scheduler():
+def start_scheduler1():
     from apscheduler.schedulers.background import BackgroundScheduler
     interval_minutes = int(os.environ.get("SCAN_INTERVAL_MINUTES", 15))
     retention_days = int(os.environ.get("RETENTION_DAYS", 7))
 
-    def scan_and_prune():
+    def scan_and_prune1():
         run_async(_run_full_scan())
         pruned = compliance_db.prune_old_runs(keep_days=retention_days)
         if pruned["pruned_runs"] > 0:
@@ -1372,7 +1466,62 @@ def start_scheduler():
     scan_and_prune()
     return scheduler
 
+def start_scheduler():
+    from apscheduler.schedulers.background import BackgroundScheduler
 
+    interval_minutes = int(os.environ.get("SCAN_INTERVAL_MINUTES", 15))
+    retention_days = int(os.environ.get("RETENTION_DAYS", 7))
+
+    def scan_and_prune():
+        try:
+            print("[scheduler] Starting scheduled scan...")
+            run_async(_run_full_scan())
+
+            pruned = compliance_db.prune_old_runs(
+                keep_days=retention_days
+            )
+
+            if pruned["pruned_runs"] > 0:
+                print(
+                    f"[retention] pruned "
+                    f"{pruned['pruned_runs']} runs older than "
+                    f"{retention_days} days"
+                )
+
+        except Exception as e:
+            app.logger.exception(
+                "[scheduler] Scan failed: %s", e
+            )
+
+    scheduler = BackgroundScheduler()
+
+    scheduler.add_job(
+        scan_and_prune,
+        "interval",
+        minutes=interval_minutes,
+        id="compliance_scan",
+        replace_existing=True,
+    )
+
+    scheduler.add_job(
+        compliance_db.vacuum,
+        "interval",
+        hours=24,
+        id="database_vacuum",
+        replace_existing=True,
+    )
+
+    scheduler.start()
+
+    # IMPORTANT:
+    # Do NOT run scan_and_prune() here.
+    # The first scan will happen after SCAN_INTERVAL_MINUTES.
+    print(
+        f"[scheduler] Started. First scan in "
+        f"{interval_minutes} minutes."
+    )
+
+    return scheduler
 # ---------------------------------------------------------------------------
 # AI layer: draft a remediation comment via a local LLM (Ollama). This never
 # writes to Jira on its own — it only returns text for a human to review.
@@ -1465,14 +1614,21 @@ def dashboard():
 
 
 if __name__ == "__main__":
+    #start_scheduler()
+
     # avoid starting the scheduler twice under Flask's debug reloader
-    if os.environ.get("WERKZEUG_RUN_MAIN") != "true" and not app.debug:
-        start_scheduler()
-    elif os.environ.get("WERKZEUG_RUN_MAIN") == "true":
-        start_scheduler()
+    #if os.environ.get("WERKZEUG_RUN_MAIN") != "true" and not app.debug:
+        #start_scheduler()
+    #elif os.environ.get("WERKZEUG_RUN_MAIN") == "true":
+        #start_scheduler()
     # threaded=True lets the server handle multiple requests at once —
     # without it, the dashboard's 6 parallel fetch() calls (loadAll())
     # get serialized one at a time server-side, adding their individual
     # latencies together instead of overlapping. This was the actual
     # cause of "scan finishes fine, but the display update lags."
-    app.run(host="0.0.0.0", port=5000, debug=True, threaded=True)
+    app.run(
+        host="0.0.0.0",
+        port=5000,
+        debug=True,
+        threaded=True
+    )
