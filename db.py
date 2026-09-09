@@ -208,11 +208,18 @@ def save_additional_checks(run_id, results, pair_type):
     conn.close()
 
 
-def get_pair_findings(run_id, pair_type):
+def get_pair_findings(run_id, pair_type, include_compliant=False):
     conn = get_conn()
-    rows = conn.execute(
-        "SELECT * FROM checks WHERE run_id = ? AND pair_type = ? AND compliant = 0", (run_id, pair_type)
-    ).fetchall()
+    if include_compliant:
+        rows = conn.execute(
+            "SELECT * FROM checks WHERE run_id = ? AND pair_type = ?",
+            (run_id, pair_type),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT * FROM checks WHERE run_id = ? AND pair_type = ? AND compliant = 0",
+            (run_id, pair_type),
+        ).fetchall()
     conn.close()
     return [dict(r) for r in rows]
 

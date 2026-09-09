@@ -57,6 +57,21 @@ const OUTCOME_EPIC_CFG = {
   hasActions: true, dependentSide: 'left',
 }
 
+function getOutcomeTabCount(data) {
+  return new Set([
+    ...data.outcome.map(d => d.story_key).filter(Boolean),
+    ...data.outcomeEpic.map(d => d.story_key).filter(Boolean),
+    ...data.outcomeFields.map(f => f.entity_key).filter(Boolean),
+  ]).size
+}
+
+function getOutcomePhaseRows(data) {
+  return [
+    ...data.outcomeEpic.map(OUTCOME_EPIC_CFG.getRows),
+    ...data.outcome.map(TABS.outcome.getRows),
+  ]
+}
+
 async function fetchJSON(url, opts) {
   const r = await fetch(url, opts)
   return r.json()
@@ -280,6 +295,7 @@ export default function App() {
   const cfg = TABS[currentTab]
   const epicFieldsCount = new Set([...data.epic.map(d => d.story_key), ...data.epicFields.map(f => f.entity_key)]).size
   const crCount = new Set(data.cr.map(f => f.entity_key)).size
+  const outcomeCount = getOutcomeTabCount(data)
 
   return (
     <div>
@@ -311,7 +327,7 @@ export default function App() {
 
       <div className="tabs">
         {Object.entries(TABS).map(([key, t]) => {
-          const count = key === 'epic' ? epicFieldsCount : key === 'cr' ? crCount : data[key].length
+          const count = key === 'epic' ? epicFieldsCount : key === 'cr' ? crCount : key === 'outcome' ? outcomeCount : data[key].length
           return (
             <button key={key} className={'tabbtn' + (currentTab === key ? ' active' : '')} onClick={() => switchTab(key)}>
               {t.label} <span className={'count' + (count > 0 ? ' has-issues' : '')}>{count}</span>
@@ -345,7 +361,7 @@ export default function App() {
           sortAsc={sortAsc} setSortAsc={setSortAsc} expandedKey={expandedKey} setExpandedKey={setExpandedKey}
           onResolve={resolveRow} onDraft={draftPhaseComment} onStatusChange={openStatusBox}
           statusChange={statusChange} onApplyStatus={applyStatusChange} onSelectTransition={selectTransition} onCloseStatus={() => setStatusChange(null)}
-          title="Phase mismatches" jiraBase={jiraBase} summaries={summaries} scrumTeams={scrumTeams} scrumTeamFilter={scrumTeamFilter} onTitleClick={openTitleModal}
+          title="Status mismatches" jiraBase={jiraBase} summaries={summaries} scrumTeams={scrumTeams} scrumTeamFilter={scrumTeamFilter} onTitleClick={openTitleModal}
         />
       )}
       {!cfg.combined && !cfg.fieldTab && !cfg.outcomeCombined && data[currentTab].length > 0 && (
@@ -380,14 +396,14 @@ export default function App() {
             sortAsc={sortAsc} setSortAsc={setSortAsc} expandedKey={expandedKey} setExpandedKey={setExpandedKey}
             onResolve={resolveRow} onDraft={draftPhaseComment} onStatusChange={openStatusBox}
             statusChange={statusChange} onApplyStatus={applyStatusChange} onSelectTransition={selectTransition} onCloseStatus={() => setStatusChange(null)}
-            title="Epic phase mismatches" jiraBase={jiraBase} summaries={summaries} scrumTeams={scrumTeams} scrumTeamFilter={scrumTeamFilter} onTitleClick={openTitleModal}
+            title="Epic Status mismatches" jiraBase={jiraBase} summaries={summaries} scrumTeams={scrumTeams} scrumTeamFilter={scrumTeamFilter} onTitleClick={openTitleModal}
           />}
           {data.outcome.length > 0 && <PhaseTable
             cfg={cfg} rows={data.outcome} reasonFilter={reasonFilter} sevFilter={sevFilter}
             sortAsc={sortAsc} setSortAsc={setSortAsc} expandedKey={expandedKey} setExpandedKey={setExpandedKey}
             onResolve={resolveRow} onDraft={draftPhaseComment} onStatusChange={openStatusBox}
             statusChange={statusChange} onApplyStatus={applyStatusChange} onSelectTransition={selectTransition} onCloseStatus={() => setStatusChange(null)}
-            title="Story phase mismatches" jiraBase={jiraBase} summaries={summaries} scrumTeams={scrumTeams} scrumTeamFilter={scrumTeamFilter} onTitleClick={openTitleModal}
+            title="Story Status mismatches" jiraBase={jiraBase} summaries={summaries} scrumTeams={scrumTeams} scrumTeamFilter={scrumTeamFilter} onTitleClick={openTitleModal}
           />}
           {data.outcomeFields.length > 0 && <FieldTable
             findings={data.outcomeFields} reasonFilter={fieldReasonFilter} sevFilter={sevFilter}
@@ -472,7 +488,7 @@ function FieldReasonFilter({ findings, value, onChange }) {
   )
 }
 
-const PAGE_SIZE = 25
+const PAGE_SIZE = 10
 
 function Pagination({ page, setPage, totalItems, pageSize = PAGE_SIZE }) {
   const totalPages = Math.max(1, Math.ceil(totalItems / pageSize))
@@ -497,6 +513,21 @@ function Cards({ tab, data }) {
     checked = entities.size; nonCompliant = entities.size
     critHigh = data.cr.filter(f => f.severity === 'High').length
     total = data.cr.length
+  } else if (cfg.outcomeCombined) {
+    const phaseRows = getOutcomePhaseRows(data)
+    const checkedKeys = new Set([
+      ...phaseRows.map(r => r.rightKey).filter(Boolean),
+      ...data.outcomeFields.map(f => f.entity_key).filter(Boolean),
+    ])
+    const nonCompliantKeys = new Set([
+      ...phaseRows.filter(r => r.severity).map(r => r.rightKey).filter(Boolean),
+      ...data.outcomeFields.map(f => f.entity_key).filter(Boolean),
+    ])
+    checked = checkedKeys.size
+    nonCompliant = nonCompliantKeys.size
+    critHigh = phaseRows.filter(r => r.severity === 'Critical' || r.severity === 'High').length +
+      data.outcomeFields.filter(f => f.severity === 'Critical' || f.severity === 'High').length
+    total = phaseRows.length + data.outcomeFields.length
   } else {
     const rows = (cfg.combined ? data.epic : data[tab]).map(cfg.getRows)
     checked = rows.length; nonCompliant = rows.length
@@ -522,6 +553,19 @@ function Charts({ tab, data }) {
     breakdown = Object.entries(byField).map(([name, value]) => ({ name, value }))
     const sevCounts = { Critical: 0, High: 0, Medium: 0, Low: 0 }
     data.cr.forEach(f => { if (sevCounts[f.severity] !== undefined) sevCounts[f.severity]++ })
+    sevData = Object.entries(sevCounts).map(([name, value]) => ({ name, value }))
+  } else if (cfg.outcomeCombined) {
+    const phaseRows = getOutcomePhaseRows(data)
+    const byReason = {}
+    phaseRows.filter(r => r.reason).forEach(r => { byReason[r.reason] = (byReason[r.reason] || 0) + 1 })
+    data.outcomeFields.filter(f => f.field).forEach(f => {
+      const label = `Field: ${f.field}`
+      byReason[label] = (byReason[label] || 0) + 1
+    })
+    breakdown = Object.entries(byReason).map(([name, value]) => ({ name, value }))
+    const sevCounts = { Critical: 0, High: 0, Medium: 0, Low: 0 }
+    phaseRows.forEach(r => { if (r.severity && sevCounts[r.severity] !== undefined) sevCounts[r.severity]++ })
+    data.outcomeFields.forEach(f => { if (sevCounts[f.severity] !== undefined) sevCounts[f.severity]++ })
     sevData = Object.entries(sevCounts).map(([name, value]) => ({ name, value }))
   } else {
     const rows = (cfg.combined ? data.epic : data[tab]).map(cfg.getRows)

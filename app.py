@@ -816,6 +816,7 @@ async def _run_full_scan(project_key=None, board_id=None):
     field_findings_by_entity = []  # [(entity_type, entity_key, entity_status, findings)]
     epic_to_cr_entries = {}  # epic_key -> [(cr_key, cr_status), ...]
     outcome_to_epic_entries = {}  # outcome_key -> [(epic_key, epic_status), ...] — an Epic's parent is an Outcome
+    outcome_status_by_key = {}
     epic_results = []
     outcome_results = []
     outcome_epic_results = []
@@ -840,7 +841,58 @@ async def _run_full_scan(project_key=None, board_id=None):
 
             print(f"[scan] fetching board membership...")
             allowed_keys = await asyncio.to_thread(_get_allowed_issue_keys, board_id, project_key)
-            print(f"[scan] {len(allowed_keys)} issue keys to process")
+            print(f"[scan] {len(allowed_keys)} issue keys to process::::::")
+# Outcome field-completeness + Story <- Outcome phase alignment
+            outcomes = await _discover_issues(session, OUTCOME_DISCOVERY_JQL, project_key, board_id)
+
+            print(f"[scan] discovered {len(outcomes)} Outcomes, fetching field data concurrently...")
+            app.logger.info(
+                "[scan] Discovered %d Outcomes before board filtering (project=%s board_id=%s)",
+                len(outcomes),
+                project_key,
+                board_id,
+            )
+            outcomes = [o for o in outcomes]
+            app.logger.info("[scan] Outcomes after board/allowed filtering: %d", len(outcomes))
+
+            issue_summaries.update({o.get("key"): o.get("summary") for o in outcomes})
+            print(f"[scan] discovered {len(outcomes)} Outcomes, fetching field data concurrently...")
+            outcome_raw_by_key = await _fetch_raw_concurrent([o.get("key") for o in outcomes])
+            print(f"[scan] fetching linked stories for {len(outcomes)} Outcomes concurrently...")
+            outcome_linked_by_key = await _linked_issues_concurrent(session, [o.get("key") for o in outcomes])
+            for _linked_list in outcome_linked_by_key.values():
+                issue_summaries.update({i.get("key"): i.get("summary") for i in _linked_list})
+            outcome_field_map = _effective_field_map("outcome")
+
+            for outcome in outcomes:
+                outcome_key = outcome.get("key")
+                outcome_status = (outcome.get("status") or {}).get("name")
+                outcome_status_by_key[outcome_key] = outcome_status
+                _ensure_classified("outcome", outcome_status)
+
+                raw = outcome_raw_by_key.get(outcome_key)
+                if raw is not None:
+                    outcome_findings = field_rules.check_outcome_fields(raw.get("fields", {}), outcome_status, field_map=outcome_field_map)
+                    field_findings_by_entity.append(("outcome", outcome_key, outcome_status, outcome_findings))
+                    scrum_team = field_rules._value(raw.get("fields", {}), SCRUM_TEAM_FIELD_ID)
+                    if scrum_team:
+                        issue_scrum_teams[outcome_key] = scrum_team
+
+                outcome_linked = [i for i in outcome_linked_by_key.get(outcome_key, []) if i.get("key") in allowed_keys]
+
+                for issue in outcome_linked:
+                    if (issue.get("issue_type") or {}).get("name") != "Story":
+                        continue
+                    story_key = issue.get("key")
+                    story_status = (issue.get("status") or {}).get("name")
+                    verdict = compliance_rules.evaluate_outcome(story_status, outcome_status)
+                    outcome_results.append({
+                        "pair_type": "story_outcome",
+                        "cr_key": story_key, "cr_status": story_status,
+                        "story_key": outcome_key, "story_status": outcome_status,
+                        "compliant": verdict["compliant"], "reason": verdict["reason"],
+                        "severity": verdict["severity"], "score": verdict["score"],
+                    })
 
             crs = await _discover_issues(session, CR_DISCOVERY_JQL, project_key, board_id)
             app.logger.info(
@@ -1000,70 +1052,24 @@ async def _run_full_scan(project_key=None, board_id=None):
                     "severity": verdict["severity"], "score": verdict["score"],
                 })
 
-            # Outcome field-completeness + Story <- Outcome phase alignment
-            outcomes = await _discover_issues(session, OUTCOME_DISCOVERY_JQL, project_key, board_id)
-            app.logger.info(
-                "[scan] Discovered %d Outcomes before board filtering (project=%s board_id=%s)",
-                len(outcomes),
-                project_key,
-                board_id,
-            )
-            outcomes = [o for o in outcomes]
-            app.logger.info("[scan] Outcomes after board/allowed filtering: %d", len(outcomes))
-
-            issue_summaries.update({o.get("key"): o.get("summary") for o in outcomes})
-            print(f"[scan] discovered {len(outcomes)} Outcomes, fetching field data concurrently...")
-            outcome_raw_by_key = await _fetch_raw_concurrent([o.get("key") for o in outcomes])
-            print(f"[scan] fetching linked stories for {len(outcomes)} Outcomes concurrently...")
-            outcome_linked_by_key = await _linked_issues_concurrent(session, [o.get("key") for o in outcomes])
-            for _linked_list in outcome_linked_by_key.values():
-                issue_summaries.update({i.get("key"): i.get("summary") for i in _linked_list})
-            outcome_field_map = _effective_field_map("outcome")
-
-            for outcome in outcomes:
-                outcome_key = outcome.get("key")
-                outcome_status = (outcome.get("status") or {}).get("name")
-                _ensure_classified("outcome", outcome_status)
-
-                raw = outcome_raw_by_key.get(outcome_key)
-                if raw is not None:
-                    outcome_findings = field_rules.check_outcome_fields(raw.get("fields", {}), outcome_status, field_map=outcome_field_map)
-                    field_findings_by_entity.append(("outcome", outcome_key, outcome_status, outcome_findings))
-                    scrum_team = field_rules._value(raw.get("fields", {}), SCRUM_TEAM_FIELD_ID)
-                    if scrum_team:
-                        issue_scrum_teams[outcome_key] = scrum_team
-
-                outcome_linked = [i for i in outcome_linked_by_key.get(outcome_key, []) if i.get("key") in allowed_keys]
-
-                for issue in outcome_linked:
-                    if (issue.get("issue_type") or {}).get("name") != "Story":
-                        continue
-                    story_key = issue.get("key")
-                    story_status = (issue.get("status") or {}).get("name")
-                    verdict = compliance_rules.evaluate_outcome(story_status, outcome_status)
-                    outcome_results.append({
-                        "pair_type": "story_outcome",
-                        "cr_key": story_key, "cr_status": story_status,
-                        "story_key": outcome_key, "story_status": outcome_status,
-                        "compliant": verdict["compliant"], "reason": verdict["reason"],
-                        "severity": verdict["severity"], "score": verdict["score"],
-                    })
-
-                # Outcome <- Epic bottleneck check: an Epic's parent is
-                # an Outcome (additive to the Story<->Outcome relationship
-                # above — a Story linking to an Outcome and an Epic's
-                # parent being that same Outcome are two separate real
-                # relationships, not alternatives to each other).
+            # Outcome <- Epic bottleneck checks must run AFTER the Epic scan
+            # above, because that's where outcome_to_epic_entries gets filled.
+            # Running this inside the initial Outcomes loop always saw an empty
+            # mapping and therefore produced zero rows even when outcomes were
+            # discovered successfully.
+            for outcome_key, outcome_status in outcome_status_by_key.items():
                 epic_entries = outcome_to_epic_entries.get(outcome_key, [])
                 epic_verdict = compliance_rules.evaluate_outcome_epic(outcome_status, epic_entries)
-                if epic_verdict["bottleneck_epic_key"] is not None:
-                    outcome_epic_results.append({
-                        "pair_type": "outcome_epic",
-                        "cr_key": epic_verdict["bottleneck_epic_key"], "cr_status": epic_verdict["bottleneck_epic_status"],
-                        "story_key": outcome_key, "story_status": outcome_status,
-                        "compliant": epic_verdict["compliant"], "reason": epic_verdict["reason"],
-                        "severity": epic_verdict["severity"], "score": epic_verdict["score"],
-                    })
+                if epic_verdict["bottleneck_epic_key"] is None:
+                    continue
+                outcome_epic_results.append({
+                    "pair_type": "outcome_epic",
+                    "cr_key": epic_verdict["bottleneck_epic_key"], "cr_status": epic_verdict["bottleneck_epic_status"],
+                    "story_key": outcome_key, "story_status": outcome_status,
+                    "compliant": epic_verdict["compliant"], "reason": epic_verdict["reason"],
+                    "severity": epic_verdict["severity"], "score": epic_verdict["score"],
+                })
+
 
     run_id = compliance_db.save_run(results)
     if epic_results:
@@ -1080,14 +1086,16 @@ async def _run_full_scan(project_key=None, board_id=None):
     elapsed = _time.time() - scan_start
     print(f"[scan] completed in {elapsed:.1f}s — "
           f"{len(set(r['cr_key'] for r in results))} CRs, {len(results)} story checks, "
-          f"{len(epic_results)} epic checks, {len(outcome_results)} outcome checks, "
+          f"{len(epic_results)} epic checks, {len(outcome_results)} story-outcome checks, {len(outcome_epic_results)} outcome-epic checks, "
           f"{len(field_findings_by_entity)} entities field-checked")
 
     return {
         "crs_scanned": len(set(r["cr_key"] for r in results)),
         "stories_scanned": len(results),
-        "epics_scanned": len(epic_results),
-        "outcomes_scanned": len(outcome_results),
+        "epics_scanned": len(epics),
+        "outcomes_scanned": len(outcome_status_by_key),
+        "story_outcome_pairs_scanned": len(outcome_results),
+        "outcome_epic_pairs_scanned": len(outcome_epic_results),
         "field_entities_scanned": len(field_findings_by_entity),
         "field_findings_total": sum(len(f) for _, _, _, f in field_findings_by_entity),
         "scan_seconds": round(elapsed, 1),
@@ -1139,7 +1147,7 @@ def get_outcome_epic_findings():
     run_id = compliance_db.latest_run_id()
     if not run_id:
         return jsonify([])
-    return jsonify(compliance_db.get_pair_findings(run_id, "outcome_epic"))
+    return jsonify(compliance_db.get_pair_findings(run_id, "outcome_epic", include_compliant=True))
 
 
 @app.route("/api/pairs/story-outcome", methods=["GET"])
@@ -1147,7 +1155,7 @@ def get_story_outcome_findings():
     run_id = compliance_db.latest_run_id()
     if not run_id:
         return jsonify([])
-    return jsonify(compliance_db.get_pair_findings(run_id, "story_outcome"))
+    return jsonify(compliance_db.get_pair_findings(run_id, "story_outcome", include_compliant=True))
 
 
 @app.route("/api/fields/findings", methods=["GET"])

@@ -10,7 +10,7 @@ logger = logging.getLogger(__name__)
 #
 # - Windows (native venv): no easy way to point `requests` at the OS trust
 #   store via an env var, so `truststore` globally patches ssl.SSLContext to
-#   read it directly. Safe here because jira_rest.py is the main thing using
+#   read it directly. Safe here because .py is the main thing using
 #   `requests` heavily in that setup.
 #
 # - Linux (Docker): the corporate CA is already merged into the system bundle
