@@ -507,29 +507,59 @@ function Pagination({ page, setPage, totalItems, pageSize = PAGE_SIZE }) {
 
 function Cards({ tab, data }) {
   const cfg = TABS[tab]
+  const [combined, setCombined] = useState(null)
+
+  useEffect(() => {
+    if (cfg.combined || cfg.outcomeCombined) {
+      let cancelled = false
+      fetchJSON(`/api/dashboard/combined-metrics?tab=${tab}`).then(result => {
+        if (!cancelled && !result.error) setCombined(result)
+      })
+      return () => { cancelled = true }
+    } else {
+      setCombined(null)
+    }
+  }, [tab, data])
+
+  if ((cfg.combined || cfg.outcomeCombined)) {
+    if (!combined) return <div className="cards"><div className="card"><p className="label">Loading...</p></div></div>
+    return (
+      <div className="cards">
+        <div className="card">
+          <p className="label">Checked</p>
+          <p className="value">{combined.checked}</p>
+          <p className="sublabel">{combined.checked_breakdown.field_entities} entities + {combined.checked_breakdown.phase_pairs} pairs</p>
+        </div>
+        <div className="card danger">
+          <p className="label">Total issues</p>
+          <p className="value">{combined.total_issues}</p>
+          <p className="sublabel">{combined.total_issues_breakdown.phase} phase + {combined.total_issues_breakdown.field} field</p>
+        </div>
+        <div className="card">
+          <p className="label">Compliance rate</p>
+          <p className="value">{combined.compliance_rate === null ? '-' : combined.compliance_rate + '%'}</p>
+          <p className="sublabel">combined, both types</p>
+        </div>
+        <div className="card">
+          <p className="label">Issue mix</p>
+          <div className="mix-bar">
+            <div className="mix-bar-phase" style={{ width: combined.issue_mix.phase_pct + '%' }}></div>
+            <div className="mix-bar-field" style={{ width: combined.issue_mix.field_pct + '%' }}></div>
+          </div>
+          <p className="sublabel"><span className="mix-label-phase">{combined.issue_mix.phase_pct}% phase</span> {combined.issue_mix.field_pct}% field</p>
+        </div>
+      </div>
+    )
+  }
+
   let checked, nonCompliant, critHigh, total
   if (cfg.fieldTab) {
     const entities = new Set(data.cr.map(f => f.entity_key))
     checked = entities.size; nonCompliant = entities.size
     critHigh = data.cr.filter(f => f.severity === 'High').length
     total = data.cr.length
-  } else if (cfg.outcomeCombined) {
-    const phaseRows = getOutcomePhaseRows(data)
-    const checkedKeys = new Set([
-      ...phaseRows.map(r => r.rightKey).filter(Boolean),
-      ...data.outcomeFields.map(f => f.entity_key).filter(Boolean),
-    ])
-    const nonCompliantKeys = new Set([
-      ...phaseRows.filter(r => r.severity).map(r => r.rightKey).filter(Boolean),
-      ...data.outcomeFields.map(f => f.entity_key).filter(Boolean),
-    ])
-    checked = checkedKeys.size
-    nonCompliant = nonCompliantKeys.size
-    critHigh = phaseRows.filter(r => r.severity === 'Critical' || r.severity === 'High').length +
-      data.outcomeFields.filter(f => f.severity === 'Critical' || f.severity === 'High').length
-    total = phaseRows.length + data.outcomeFields.length
   } else {
-    const rows = (cfg.combined ? data.epic : data[tab]).map(cfg.getRows)
+    const rows = data[tab].map(cfg.getRows)
     checked = rows.length; nonCompliant = rows.length
     critHigh = rows.filter(r => r.severity === 'Critical' || r.severity === 'High').length
     total = rows.length
@@ -546,6 +576,59 @@ function Cards({ tab, data }) {
 
 function Charts({ tab, data }) {
   const cfg = TABS[tab]
+  const [combined, setCombined] = useState(null)
+
+  useEffect(() => {
+    if (cfg.combined || cfg.outcomeCombined) {
+      let cancelled = false
+      fetchJSON(`/api/dashboard/combined-metrics?tab=${tab}`).then(result => {
+        if (!cancelled && !result.error) setCombined(result)
+      })
+      return () => { cancelled = true }
+    } else {
+      setCombined(null)
+    }
+  }, [tab, data])
+
+  if (cfg.combined || cfg.outcomeCombined) {
+    if (!combined) return <div className="charts"><div className="chart-box"><p className="title">Loading...</p></div></div>
+    const sevLabels = ['Critical', 'High', 'Medium', 'Low']
+    const sevTotals = sevLabels.map(s => (combined.severity_by_type.phase[s] || 0) + (combined.severity_by_type.field[s] || 0))
+    const sevPieData = sevLabels.map((name, i) => ({ name, value: sevTotals[i] })).filter(d => d.value > 0)
+    const byTypeData = sevLabels.map(s => ({
+      name: s,
+      Phase: combined.severity_by_type.phase[s] || 0,
+      Field: combined.severity_by_type.field[s] || 0,
+    }))
+    return (
+      <div className="charts">
+        <div className="chart-box">
+          <p className="title">Severity — combined</p>
+          <ResponsiveContainer width="100%" height="85%">
+            <PieChart>
+              <Pie data={sevPieData} dataKey="value" nameKey="name" innerRadius={35} outerRadius={60}>
+                {sevPieData.map((entry, i) => <Cell key={i} fill={SEV_COLORS[entry.name]} />)}
+              </Pie>
+              <Tooltip />
+            </PieChart>
+          </ResponsiveContainer>
+        </div>
+        <div className="chart-box">
+          <p className="title">Issues by type and severity</p>
+          <ResponsiveContainer width="100%" height="85%">
+            <BarChart data={byTypeData}>
+              <XAxis dataKey="name" tick={{ fontSize: 10 }} />
+              <YAxis allowDecimals={false} tick={{ fontSize: 10 }} />
+              <Tooltip />
+              <Bar dataKey="Phase" stackId="a" fill="#1d70b8" />
+              <Bar dataKey="Field" stackId="a" fill="#f47738" />
+            </BarChart>
+          </ResponsiveContainer>
+        </div>
+      </div>
+    )
+  }
+
   let breakdown, sevData
   if (cfg.fieldTab) {
     const byField = {}
@@ -554,21 +637,8 @@ function Charts({ tab, data }) {
     const sevCounts = { Critical: 0, High: 0, Medium: 0, Low: 0 }
     data.cr.forEach(f => { if (sevCounts[f.severity] !== undefined) sevCounts[f.severity]++ })
     sevData = Object.entries(sevCounts).map(([name, value]) => ({ name, value }))
-  } else if (cfg.outcomeCombined) {
-    const phaseRows = getOutcomePhaseRows(data)
-    const byReason = {}
-    phaseRows.filter(r => r.reason).forEach(r => { byReason[r.reason] = (byReason[r.reason] || 0) + 1 })
-    data.outcomeFields.filter(f => f.field).forEach(f => {
-      const label = `Field: ${f.field}`
-      byReason[label] = (byReason[label] || 0) + 1
-    })
-    breakdown = Object.entries(byReason).map(([name, value]) => ({ name, value }))
-    const sevCounts = { Critical: 0, High: 0, Medium: 0, Low: 0 }
-    phaseRows.forEach(r => { if (r.severity && sevCounts[r.severity] !== undefined) sevCounts[r.severity]++ })
-    data.outcomeFields.forEach(f => { if (sevCounts[f.severity] !== undefined) sevCounts[f.severity]++ })
-    sevData = Object.entries(sevCounts).map(([name, value]) => ({ name, value }))
   } else {
-    const rows = (cfg.combined ? data.epic : data[tab]).map(cfg.getRows)
+    const rows = data[tab].map(cfg.getRows)
     const byReason = {}
     rows.forEach(r => { byReason[r.reason] = (byReason[r.reason] || 0) + 1 })
     breakdown = Object.entries(byReason).map(([name, value]) => ({ name, value }))

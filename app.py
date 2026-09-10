@@ -1072,6 +1072,7 @@ async def _run_full_scan(project_key=None, board_id=None):
 
 
     run_id = compliance_db.save_run(results)
+    compliance_db.save_scan_totals(run_id, {"cr": len(crs), "epic": len(epics), "outcome": len(outcomes)})
     if epic_results:
         compliance_db.save_additional_checks(run_id, epic_results, "epic_cr")
     if outcome_results:
@@ -1417,6 +1418,73 @@ def dashboard_summary():
 def dashboard_trend():
     days = int(request.args.get("days", 14))
     return jsonify(compliance_db.get_trend(days))
+
+
+@app.route("/api/dashboard/combined-metrics", methods=["GET"])
+def combined_metrics():
+    """Blended metrics across BOTH phase-mismatch and field-issue data
+    for one tab — used by the Epic and Outcome tabs, which show both
+    kinds of tables. Computed server-side because the frontend never
+    sees full-population data (every findings endpoint only returns
+    flagged/non-compliant rows) — this reads the underlying checks
+    table directly, bypassing that restriction, to get real totals."""
+    tab = request.args.get("tab")
+    if tab not in ("epic", "outcome"):
+        return jsonify({"error": "tab must be 'epic' or 'outcome'"}), 400
+
+    empty = {
+        "checked": 0, "total_issues": 0, "compliance_rate": None,
+        "issue_mix": {"phase_pct": 0, "field_pct": 0},
+        "severity_by_type": {"phase": {"Critical": 0, "High": 0, "Medium": 0, "Low": 0},
+                              "field": {"Critical": 0, "High": 0, "Medium": 0, "Low": 0}},
+    }
+    run_id = compliance_db.latest_run_id()
+    if not run_id:
+        return jsonify(empty)
+
+    totals = compliance_db.get_latest_scan_totals()
+    field_total = totals.get(tab, 0)
+
+    if tab == "epic":
+        pair_types = ["epic_cr"]
+    else:
+        pair_types = ["outcome_epic", "story_outcome"]
+
+    phase_total = 0
+    phase_non_compliant = 0
+    sev_phase = {"Critical": 0, "High": 0, "Medium": 0, "Low": 0}
+    for pt in pair_types:
+        counts = compliance_db.get_pair_counts(run_id, pt)
+        phase_total += counts["total"]
+        phase_non_compliant += counts["non_compliant"]
+        for row in compliance_db.get_pair_findings(run_id, pt):
+            if row["severity"] in sev_phase:
+                sev_phase[row["severity"]] += 1
+
+    field_findings = compliance_db.get_latest_field_findings(entity_type=tab)
+    field_issue_entities = len(set(f["entity_key"] for f in field_findings))
+    field_issue_count = len(field_findings)
+    sev_field = {"Critical": 0, "High": 0, "Medium": 0, "Low": 0}
+    for f in field_findings:
+        if f["severity"] in sev_field:
+            sev_field[f["severity"]] += 1
+
+    checked = phase_total + field_total
+    non_compliant = phase_non_compliant + field_issue_entities
+    total_issues = phase_non_compliant + field_issue_count
+    compliance_rate = round(((checked - non_compliant) / checked) * 100) if checked else None
+    phase_pct = round((phase_non_compliant / total_issues) * 100) if total_issues else 0
+    field_pct = (100 - phase_pct) if total_issues else 0
+
+    return jsonify({
+        "checked": checked,
+        "checked_breakdown": {"phase_pairs": phase_total, "field_entities": field_total},
+        "total_issues": total_issues,
+        "total_issues_breakdown": {"phase": phase_non_compliant, "field": field_issue_count},
+        "compliance_rate": compliance_rate,
+        "issue_mix": {"phase_pct": phase_pct, "field_pct": field_pct},
+        "severity_by_type": {"phase": sev_phase, "field": sev_field},
+    })
 
 
 @app.route("/api/dashboard/breakdown", methods=["GET"])

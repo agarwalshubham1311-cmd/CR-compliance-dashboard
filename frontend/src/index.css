@@ -141,3 +141,9 @@ a.key-link:hover { color: #003078; }
 .pagination { display: flex; align-items: center; gap: 14px; padding: 12px 18px; border-top: 1px solid var(--border); font-size: 14px; }
 .pagination-info { color: var(--text-secondary); margin-right: auto; }
 .pagination-page { color: var(--text-secondary); }
+
+.card .sublabel { font-size: 11px; color: var(--text-secondary); margin: 6px 0 0; }
+.mix-bar { display: flex; height: 10px; margin: 9px 0 6px; overflow: hidden; }
+.mix-bar-phase { background: #1d70b8; }
+.mix-bar-field { background: #f47738; }
+.mix-label-phase { color: #003078; font-weight: 700; margin-right: 8px; }
