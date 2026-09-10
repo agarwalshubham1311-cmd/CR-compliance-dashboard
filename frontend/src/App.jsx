@@ -92,6 +92,12 @@ export default function App() {
   const [fieldReasonFilter, setFieldReasonFilter] = useState('all')
   const [sevFilter, setSevFilter] = useState('all')
   const [sortAsc, setSortAsc] = useState(false)
+  const [collapsedSections, setCollapsedSections] = useState({
+    outcomeEpicStatusMismatches: false,
+    epicFieldIssues: false,
+    crFieldIssues: false,
+    outcomeFieldIssues: false,
+  })
   const [draft, setDraft] = useState(null) // { forKey, text, statusMsg }
   const [titleModal, setTitleModal] = useState(null) // { key, summary, description, loading, error }
   const [statusChange, setStatusChange] = useState(null) // { forKey, transitions, selected, msg }
@@ -292,6 +298,10 @@ export default function App() {
     setScrumTeamFilter('all')
   }
 
+  function toggleSection(sectionKey) {
+    setCollapsedSections(prev => ({ ...prev, [sectionKey]: !prev[sectionKey] }))
+  }
+
   const cfg = TABS[currentTab]
   const epicFieldsCount = new Set([...data.epic.map(d => d.story_key), ...data.epicFields.map(f => f.entity_key)]).size
   const crCount = new Set(data.cr.map(f => f.entity_key)).size
@@ -309,21 +319,6 @@ export default function App() {
         </div>
       </div>
 
-      <div className="scope-filters">
-        <span className="scope-label">Project</span>
-        <select value={selectedProjectKey} onChange={e => onProjectChange(e.target.value)}>
-          {projects.length === 0 && <option value="">Loading...</option>}
-          {projects.map(p => <option key={p.key} value={p.key}>{p.key} — {p.name}</option>)}
-        </select>
-        <span className="scope-label">Jira board</span>
-        <select value={selectedBoardId} onChange={e => onBoardChange(e.target.value)} disabled={isLoadingBoards}>
-          <option value="">All boards</option>
-          {boards.map(b => <option key={b.id} value={b.id}>{b.name} ({b.type})</option>)}
-        </select>
-        <span className="scope-pill">
-          Scope: {selectedProjectKey || '—'} / {isLoadingBoards ? 'Loading boards...' : (selectedBoardId ? (boards.find(b => String(b.id) === String(selectedBoardId))?.name || selectedBoardId) : 'All boards')}
-        </span>
-      </div>
 
       <div className="tabs">
         {Object.entries(TABS).map(([key, t]) => {
@@ -379,6 +374,7 @@ export default function App() {
           entityType="cr" expandedKey={expandedKey} setExpandedKey={setExpandedKey}
           onDraft={draftFieldComment} fieldCache={fieldCache} onSaved={loadAll}
           title="Non-compliant CRs" jiraBase={jiraBase} summaries={summaries} scrumTeams={scrumTeams} scrumTeamFilter={scrumTeamFilter} onTitleClick={openTitleModal}
+          isCollapsed={collapsedSections.crFieldIssues} onToggleCollapse={() => toggleSection('crFieldIssues')}
         />
       )}
       {cfg.combined && data.epicFields.length > 0 && (
@@ -387,6 +383,7 @@ export default function App() {
           entityType="epic" expandedKey={epicFieldsExpandedKey} setExpandedKey={setEpicFieldsExpandedKey}
           onDraft={draftFieldComment} fieldCache={fieldCache} onSaved={loadAll}
           title="Field issues" jiraBase={jiraBase} summaries={summaries} scrumTeams={scrumTeams} scrumTeamFilter={scrumTeamFilter} onTitleClick={openTitleModal}
+          isCollapsed={collapsedSections.epicFieldIssues} onToggleCollapse={() => toggleSection('epicFieldIssues')}
         />
       )}
       {cfg.outcomeCombined && (
@@ -397,6 +394,7 @@ export default function App() {
             onResolve={resolveRow} onDraft={draftPhaseComment} onStatusChange={openStatusBox}
             statusChange={statusChange} onApplyStatus={applyStatusChange} onSelectTransition={selectTransition} onCloseStatus={() => setStatusChange(null)}
             title="Epic Status mismatches" jiraBase={jiraBase} summaries={summaries} scrumTeams={scrumTeams} scrumTeamFilter={scrumTeamFilter} onTitleClick={openTitleModal}
+            isCollapsed={collapsedSections.outcomeEpicStatusMismatches} onToggleCollapse={() => toggleSection('outcomeEpicStatusMismatches')}
           />}
           {data.outcome.length > 0 && <PhaseTable
             cfg={cfg} rows={data.outcome} reasonFilter={reasonFilter} sevFilter={sevFilter}
@@ -410,6 +408,7 @@ export default function App() {
             entityType="outcome" expandedKey={outcomeFieldsExpandedKey} setExpandedKey={setOutcomeFieldsExpandedKey}
             onDraft={draftFieldComment} fieldCache={fieldCache} onSaved={loadAll}
             title="Field issues" jiraBase={jiraBase} summaries={summaries} scrumTeams={scrumTeams} scrumTeamFilter={scrumTeamFilter} onTitleClick={openTitleModal}
+            isCollapsed={collapsedSections.outcomeFieldIssues} onToggleCollapse={() => toggleSection('outcomeFieldIssues')}
           />}
         </>
       )}
@@ -604,7 +603,16 @@ function Charts({ tab, data }) {
   )
 }
 
-function PhaseTable({ cfg, rows, reasonFilter, sevFilter, sortAsc, setSortAsc, expandedKey, setExpandedKey, onResolve, onDraft, onStatusChange, statusChange, onApplyStatus, onSelectTransition, onCloseStatus, title, jiraBase, summaries = {}, scrumTeams = {}, scrumTeamFilter = 'all', onTitleClick }) {
+function SectionToggle({ isCollapsed, onToggleCollapse }) {
+  if (!onToggleCollapse) return null
+  return (
+    <button type="button" className="btn-header" onClick={onToggleCollapse}>
+      {isCollapsed ? 'Expand' : 'Collapse'}
+    </button>
+  )
+}
+
+function PhaseTable({ cfg, rows, reasonFilter, sevFilter, sortAsc, setSortAsc, expandedKey, setExpandedKey, onResolve, onDraft, onStatusChange, statusChange, onApplyStatus, onSelectTransition, onCloseStatus, title, jiraBase, summaries = {}, scrumTeams = {}, scrumTeamFilter = 'all', onTitleClick, isCollapsed = false, onToggleCollapse = null }) {
   let filtered = rows.map(cfg.getRows)
     .filter(r => (reasonFilter === 'all' || r.reason === reasonFilter) && (sevFilter === 'all' || r.severity === sevFilter))
     .filter(r => scrumTeamFilter === 'all' || scrumTeams[r.leftKey] === scrumTeamFilter || scrumTeams[r.rightKey] === scrumTeamFilter)
@@ -618,8 +626,11 @@ function PhaseTable({ cfg, rows, reasonFilter, sevFilter, sortAsc, setSortAsc, e
 
   return (
     <div className="table-wrap">
-      <div className="table-header"><p>{title}</p></div>
-      <table>
+      <div className="table-header" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
+        <p>{title}</p>
+        <SectionToggle isCollapsed={isCollapsed} onToggleCollapse={onToggleCollapse} />
+      </div>
+      {!isCollapsed && <table>
         <colgroup>{cfg.columns.map((_, i) => <col key={i} style={{ width: (cfg.hasActions ? [12, 16, 12, 16, 24, 12] : [14, 16, 14, 16, 26, 14])[i] + '%' }} />)}{cfg.hasActions && <col style={{ width: '8%' }} />}<col style={{ width: '4%' }} /></colgroup>
         <thead>
           <tr>
@@ -707,13 +718,13 @@ function PhaseTable({ cfg, rows, reasonFilter, sevFilter, sortAsc, setSortAsc, e
             )
           })}
         </tbody>
-      </table>
-      <Pagination page={page} setPage={setPage} totalItems={filtered.length} />
+      </table>}
+      {!isCollapsed && <Pagination page={page} setPage={setPage} totalItems={filtered.length} />}
     </div>
   )
 }
 
-function FieldTable({ findings, reasonFilter, sevFilter, entityType, expandedKey, setExpandedKey, onDraft, fieldCache, onSaved, title, jiraBase, summaries = {}, scrumTeams = {}, scrumTeamFilter = 'all', onTitleClick }) {
+function FieldTable({ findings, reasonFilter, sevFilter, entityType, expandedKey, setExpandedKey, onDraft, fieldCache, onSaved, title, jiraBase, summaries = {}, scrumTeams = {}, scrumTeamFilter = 'all', onTitleClick, isCollapsed = false, onToggleCollapse = null }) {
   const filtered = findings
     .filter(f => (reasonFilter === 'all' || f.field === reasonFilter) && (sevFilter === 'all' || f.severity === sevFilter))
     .filter(f => scrumTeamFilter === 'all' || scrumTeams[f.entity_key] === scrumTeamFilter)
@@ -734,8 +745,11 @@ function FieldTable({ findings, reasonFilter, sevFilter, entityType, expandedKey
 
   return (
     <div className="table-wrap">
-      <div className="table-header"><p>{title}</p></div>
-      <table>
+      <div className="table-header" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
+        <p>{title}</p>
+        <SectionToggle isCollapsed={isCollapsed} onToggleCollapse={onToggleCollapse} />
+      </div>
+      {!isCollapsed && <table>
         <colgroup><col style={{ width: '16%' }} /><col style={{ width: '18%' }} /><col style={{ width: '12%' }} /><col style={{ width: '26%' }} /><col style={{ width: '20%' }} /><col style={{ width: '8%' }} /></colgroup>
         <thead><tr><th>{entityLabel}</th><th>Status</th><th>Severity</th><th>Issues</th><th>Actions</th><th></th></tr></thead>
         <tbody>
@@ -760,8 +774,8 @@ function FieldTable({ findings, reasonFilter, sevFilter, entityType, expandedKey
             )
           })}
         </tbody>
-      </table>
-      <Pagination page={page} setPage={setPage} totalItems={groupList.length} />
+      </table>}
+      {!isCollapsed && <Pagination page={page} setPage={setPage} totalItems={groupList.length} />}
     </div>
   )
 }
