@@ -9,7 +9,7 @@ from mcp.client.sse import sse_client
 app = Flask(__name__, static_folder="static", static_url_path="")
 
 # URL of the jira-mcp container's SSE endpoint (set MCP_SERVER_URL env var to override)
-MCP_SERVER_URL = os.environ.get("MCP_SERVER_URL", "http://jira-mcp:8000/sse")
+MCP_SERVER_URL = os.environ.get("MCP_SERVER_URL", "http://localhost:8000/sse")
 
 import db as compliance_db
 import compliance as compliance_rules
@@ -540,9 +540,8 @@ def cr_mismatches():
 # no board clause), so linked results get their own explicit membership
 # check too, using the same allowed_keys set.
 ALLOWED_BOARD_NAMES = [b.strip() for b in os.environ.get("ALLOWED_BOARD_NAMES", "ACC,ACBD").split(",") if b.strip()]
-CR_DISCOVERY_JQL = 'filter = Asylum_CRs'
-EPIC_DISCOVERY_JQL = 'filter = Asylum_Epics'
-OUTCOME_DISCOVERY_JQL = 'filter = Asylum_Outcomes'
+
+CR_DISCOVERY_JQL = os.environ.get("CR_DISCOVERY_JQL", 'issuetype = "Change Request"')
 
 # Scrum Team is a filter dimension, not a mandatory field check, so it
 # lives here rather than in field_rules.py's CR/EPIC/OUTCOME_FIELDS.
@@ -554,50 +553,29 @@ SCRUM_TEAM_FIELD_ID = os.environ.get("SCRUM_TEAM_FIELD_ID", "customfield_21304")
 # those weren't touched in this pass.
 EPIC_LINK_FIELD_ID = os.environ.get("EPIC_LINK_FIELD_ID", "customfield_10006")
 PARENT_LINK_FIELD_ID = os.environ.get("PARENT_LINK_FIELD_ID", "customfield_14701")
+OUTCOME_DISCOVERY_JQL = os.environ.get("OUTCOME_DISCOVERY_JQL", 'issuetype = "Outcome"')
+EPIC_DISCOVERY_JQL = os.environ.get("EPIC_DISCOVERY_JQL", 'issuetype = "Epic"')
 
 
-def _get_allowed_issue_keys(board_id=None, project_key=None):
-    """Every issue key currently on the specified board or boards in ALLOWED_BOARD_NAMES.
-
-    - If board_id is provided: fetch issues only from that specific board
-    - If project_key is provided: fetch issues from all boards matching that project
-    - Otherwise: fetch issues from all boards matching ALLOWED_BOARD_NAMES
-
-    The board membership is the actual source of truth for scoping the scan, since
-    board membership isn't something JQL can filter on directly (unlike a project,
-    boards aren't encoded in the issue key either, so this has to be a real membership
-    lookup, not a JQL clause or a key-prefix check).
-
-    Synchronous (jira_rest uses `requests`) — callers should run this via asyncio.to_thread."""
+def _get_allowed_issue_keys():
+    """Every issue key currently on any board named in ALLOWED_BOARD_NAMES
+    (ACC, ACBD by default) — the actual source of truth for scoping the
+    scan, since board membership isn't something JQL can filter on
+    directly (unlike a project, boards aren't encoded in the issue key
+    either, so this has to be a real membership lookup, not a JQL clause
+    or a key-prefix check). Synchronous (jira_rest uses `requests`) —
+    callers should run this via asyncio.to_thread."""
+    all_boards = jira_rest.get_boards()
+    matching_boards = [b for b in all_boards if b.get("name") in ALLOWED_BOARD_NAMES]
+    if not matching_boards:
+        print(f"[scan] WARNING: no boards found matching {ALLOWED_BOARD_NAMES} — "
+              f"check the exact board names in Jira, or set ALLOWED_BOARD_NAMES to override.")
+        return set()
 
     allowed_keys = set()
-
-    if board_id:
-        # Fetch issues from the specific selected board only
-        print(f"[scan] fetching issues from selected board {board_id}...")
-        issues = jira_rest.search_board_issues(board_id)
+    for board in matching_boards:
+        issues = jira_rest.search_board_issues(board["id"])
         allowed_keys.update(i.get("key") for i in issues if i.get("key"))
-        print(f"[scan] found {len(allowed_keys)} issues on board {board_id}")
-    else:
-        # Fetch issues from all allowed boards
-        all_boards = jira_rest.get_boards(project_key=project_key)
-        # Filter to only boards in ALLOWED_BOARD_NAMES
-        matching_boards = [b for b in all_boards if b.get("name") in ALLOWED_BOARD_NAMES]
-
-        if not matching_boards:
-            if project_key:
-                print(f"[scan] WARNING: no boards found for project {project_key} matching {ALLOWED_BOARD_NAMES} — "
-                      f"check the exact board names in Jira, or set ALLOWED_BOARD_NAMES to override.")
-            else:
-                print(f"[scan] WARNING: no boards found matching {ALLOWED_BOARD_NAMES} — "
-                      f"check the exact board names in Jira, or set ALLOWED_BOARD_NAMES to override.")
-            return set()
-
-        print(f"[scan] fetching issues from {len(matching_boards)} allowed boards...")
-        for board in matching_boards:
-            issues = jira_rest.search_board_issues(board["id"])
-            allowed_keys.update(i.get("key") for i in issues if i.get("key"))
-
     return allowed_keys
 
 # How many direct-REST fetches (jira_rest.get_issue_raw) run concurrently.
@@ -608,7 +586,7 @@ def _get_allowed_issue_keys(board_id=None, project_key=None):
 CONCURRENT_FETCH_LIMIT = int(os.environ.get("CONCURRENT_FETCH_LIMIT", 8))
 
 
-async def _search_all_issues11(session, jql, max_pages=250):
+async def _search_all_issues(session, jql, max_pages=50):
     """jira_search only returns one page by default, which silently
     truncates results on any query returning more than a page's worth —
     a real correctness bug at 10k+ record scale, not just a performance
@@ -638,38 +616,7 @@ async def _search_all_issues11(session, jql, max_pages=250):
             break
     return all_issues
 
-async def _search_all_issues(session, jql, max_pages=250):
-    """jira_search paginates via start_at (NOT page_token — that's a
-    Cloud-only mechanism per the tool's own schema; this Jira instance
-    is Server/DC, which requires start_at). limit (not max_results,
-    which the tool schema rejects) controls page size, capped at 50 by
-    the tool itself. Loops using start_at + the reported total until
-    every matching issue is collected, or max_pages as a safety cap."""
-    import json as _json
-    all_issues = []
-    total = None
-    for _ in range(max_pages):
-        args = {"jql": jql, "limit": 50}
-        if all_issues:
-            args["start_at"] = len(all_issues)
-        result = await session.call_tool("jira_search", args)
-        page_issues = []
-        for block in [b.model_dump() for b in result.content]:
-            text = block.get("text")
-            if not text:
-                continue
-            try:
-                parsed = _json.loads(text)
-                page_issues = parsed.get("issues", [])
-                total = parsed.get("total")
-            except Exception:
-                pass
-        if not page_issues:
-            break
-        all_issues.extend(page_issues)
-        if total is not None and len(all_issues) >= total:
-            break
-    return all_issues
+
 async def _discover_issues(session, base_jql, project_key=None, board_id=None):
     """Finds issues matching base_jql (a type/label filter, e.g.
     CR_DISCOVERY_JQL), optionally narrowed to one board or one project.
@@ -685,16 +632,16 @@ async def _discover_issues(session, base_jql, project_key=None, board_id=None):
 
     board_id takes priority if both are somehow set, since a board
     already implies a specific project."""
-    """ if board_id:
+    if board_id:
         return await asyncio.to_thread(jira_rest.search_board_issues, board_id, base_jql)
     if project_key:
         scoped_jql = f'project = "{project_key}" AND ({base_jql})'
-        return await _search_all_issues(session, scoped_jql) """
+        return await _search_all_issues(session, scoped_jql)
     return await _search_all_issues(session, base_jql)
 
 
 async def _linked_issues_concurrent(session, keys, limit=None):
-    """Finds linked issue_search_all_issuess for multiple entities (CRs or Outcomes)
+    """Finds linked issues for multiple entities (CRs or Outcomes)
     concurrently instead of one sequential MCP round-trip per entity —
     confirmed as the dominant cost in scan time at any real scale (each
     linkedIssues() search is a full network round-trip to Jira; 9
@@ -816,97 +763,23 @@ async def _run_full_scan(project_key=None, board_id=None):
     field_findings_by_entity = []  # [(entity_type, entity_key, entity_status, findings)]
     epic_to_cr_entries = {}  # epic_key -> [(cr_key, cr_status), ...]
     outcome_to_epic_entries = {}  # outcome_key -> [(epic_key, epic_status), ...] — an Epic's parent is an Outcome
-    outcome_status_by_key = {}
     epic_results = []
     outcome_results = []
     outcome_epic_results = []
     issue_summaries = {}  # issue_key -> summary/title, collected from every discovery point below
     issue_scrum_teams = {}  # issue_key -> Scrum Team value, collected from CR/Epic/Outcome raw data
-
-    app.logger.info(
-        "[scan] Starting full scan: project_key=%s board_id=%s",
-        project_key,
-        board_id,
-    )
-    print("DEBUG MCP_SERVER_URL =", repr(MCP_SERVER_URL), flush=True)
-
-    # Clear all old scan data to ensure fresh results each time
-    #cleared = compliance_db.clear_all_scan_data()
-    #app.logger.info("[scan] Cleared %d old scan runs to start fresh", cleared["cleared_runs"])
-    #print(f"[scan] cleared {cleared['cleared_runs']} old runs for fresh data")
+    issue_status_snapshot = {}  # issue_key -> {entity_type, status, jira_updated_at} for staleness/blocked detection
 
     async with sse_client(MCP_SERVER_URL) as (read, write):
         async with ClientSession(read, write) as session:
             await session.initialize()
 
-            print(f"[scan] fetching board membership...")
-            allowed_keys = await asyncio.to_thread(_get_allowed_issue_keys, board_id, project_key)
-            print(f"[scan] {len(allowed_keys)} issue keys to process::::::")
-# Outcome field-completeness + Story <- Outcome phase alignment
-            outcomes = await _discover_issues(session, OUTCOME_DISCOVERY_JQL, project_key, board_id)
-
-            print(f"[scan] discovered {len(outcomes)} Outcomes, fetching field data concurrently...")
-            app.logger.info(
-                "[scan] Discovered %d Outcomes before board filtering (project=%s board_id=%s)",
-                len(outcomes),
-                project_key,
-                board_id,
-            )
-            outcomes = [o for o in outcomes]
-            app.logger.info("[scan] Outcomes after board/allowed filtering: %d", len(outcomes))
-
-            issue_summaries.update({o.get("key"): o.get("summary") for o in outcomes})
-            print(f"[scan] discovered {len(outcomes)} Outcomes, fetching field data concurrently...")
-            outcome_raw_by_key = await _fetch_raw_concurrent([o.get("key") for o in outcomes])
-            print(f"[scan] fetching linked stories for {len(outcomes)} Outcomes concurrently...")
-            outcome_linked_by_key = await _linked_issues_concurrent(session, [o.get("key") for o in outcomes])
-            for _linked_list in outcome_linked_by_key.values():
-                issue_summaries.update({i.get("key"): i.get("summary") for i in _linked_list})
-            outcome_field_map = _effective_field_map("outcome")
-
-            for outcome in outcomes:
-                outcome_key = outcome.get("key")
-                outcome_status = (outcome.get("status") or {}).get("name")
-                outcome_status_by_key[outcome_key] = outcome_status
-                _ensure_classified("outcome", outcome_status)
-
-                raw = outcome_raw_by_key.get(outcome_key)
-                if raw is not None:
-                    outcome_findings = field_rules.check_outcome_fields(raw.get("fields", {}), outcome_status, field_map=outcome_field_map)
-                    field_findings_by_entity.append(("outcome", outcome_key, outcome_status, outcome_findings))
-                    scrum_team = field_rules._value(raw.get("fields", {}), SCRUM_TEAM_FIELD_ID)
-                    if scrum_team:
-                        issue_scrum_teams[outcome_key] = scrum_team
-
-                outcome_linked = [i for i in outcome_linked_by_key.get(outcome_key, []) if i.get("key") in allowed_keys]
-
-                for issue in outcome_linked:
-                    if (issue.get("issue_type") or {}).get("name") != "Story":
-                        continue
-                    story_key = issue.get("key")
-                    story_status = (issue.get("status") or {}).get("name")
-                    verdict = compliance_rules.evaluate_outcome(story_status, outcome_status)
-                    outcome_results.append({
-                        "pair_type": "story_outcome",
-                        "cr_key": story_key, "cr_status": story_status,
-                        "story_key": outcome_key, "story_status": outcome_status,
-                        "compliant": verdict["compliant"], "reason": verdict["reason"],
-                        "severity": verdict["severity"], "score": verdict["score"],
-                    })
+            print(f"[scan] fetching board membership for {ALLOWED_BOARD_NAMES}...")
+            allowed_keys = await asyncio.to_thread(_get_allowed_issue_keys)
+            print(f"[scan] {len(allowed_keys)} issue keys currently on allowed boards")
 
             crs = await _discover_issues(session, CR_DISCOVERY_JQL, project_key, board_id)
-            app.logger.info(
-                "[scan] Discovered %d CRs before board filtering (project=%s board_id=%s)",
-                len(crs),
-                project_key,
-                board_id,
-            )
-            crs = [c for c in crs]
-            app.logger.info(
-                "[scan] CRs after board/allowed filtering: %d (allowed_keys count=%d)",
-                len(crs),
-                len(allowed_keys),
-            )
+            crs = [c for c in crs if c.get("key") in allowed_keys]
             issue_summaries.update({c.get("key"): c.get("summary") for c in crs})
             print(f"[scan] discovered {len(crs)} CRs, fetching field data concurrently...")
             cr_raw_by_key = await _fetch_raw_concurrent([cr.get("key") for cr in crs])
@@ -948,6 +821,7 @@ async def _run_full_scan(project_key=None, board_id=None):
                     scrum_team = field_rules._value(raw_fields, SCRUM_TEAM_FIELD_ID)
                     if scrum_team:
                         issue_scrum_teams[cr_key] = scrum_team
+                    issue_status_snapshot[cr_key] = {"entity_type": "cr", "status": cr_status, "jira_updated_at": raw_fields.get("updated"), "assignee": _get_assignee_name(raw_fields)}
 
                     epic_key = None
                     parent = raw_fields.get("parent")
@@ -974,6 +848,7 @@ async def _run_full_scan(project_key=None, board_id=None):
                     story_key = issue.get("key")
                     story_status = (issue.get("status") or {}).get("name")
                     _ensure_classified("story", story_status)
+                    issue_status_snapshot[story_key] = {"entity_type": "story", "status": story_status, "jira_updated_at": issue.get("updated"), "assignee": _get_assignee_name(issue)}
 
                     # age_days: how long since the story's last update, as a
                     # rough proxy for how long it's been sitting non-compliant.
@@ -998,14 +873,7 @@ async def _run_full_scan(project_key=None, board_id=None):
 
             # Epic <- CR bottleneck check, using the Epic Links collected above.
             epics = await _discover_issues(session, EPIC_DISCOVERY_JQL, project_key, board_id)
-            app.logger.info(
-                "[scan] Discovered %d Epics before board filtering (project=%s board_id=%s)",
-                len(epics),
-                project_key,
-                board_id,
-            )
-            epics = [e for e in epics]
-            app.logger.info("[scan] Epics after board/allowed filtering: %d", len(epics))
+            epics = [e for e in epics if e.get("key") in allowed_keys]
             issue_summaries.update({e.get("key"): e.get("summary") for e in epics})
             print(f"[scan] discovered {len(epics)} Epics, fetching field data concurrently...")
             epic_raw_by_key = await _fetch_raw_concurrent([epic.get("key") for epic in epics])
@@ -1024,6 +892,7 @@ async def _run_full_scan(project_key=None, board_id=None):
                     scrum_team = field_rules._value(epic_fields, SCRUM_TEAM_FIELD_ID)
                     if scrum_team:
                         issue_scrum_teams[epic_key] = scrum_team
+                    issue_status_snapshot[epic_key] = {"entity_type": "epic", "status": epic_status, "jira_updated_at": epic_fields.get("updated"), "assignee": _get_assignee_name(epic_fields)}
 
                     # An Epic's parent is an Outcome — confirmed against
                     # real production data that this is via the "Parent
@@ -1052,24 +921,63 @@ async def _run_full_scan(project_key=None, board_id=None):
                     "severity": verdict["severity"], "score": verdict["score"],
                 })
 
-            # Outcome <- Epic bottleneck checks must run AFTER the Epic scan
-            # above, because that's where outcome_to_epic_entries gets filled.
-            # Running this inside the initial Outcomes loop always saw an empty
-            # mapping and therefore produced zero rows even when outcomes were
-            # discovered successfully.
-            for outcome_key, outcome_status in outcome_status_by_key.items():
+            # Outcome field-completeness + Story <- Outcome phase alignment
+            outcomes = await _discover_issues(session, OUTCOME_DISCOVERY_JQL, project_key, board_id)
+            outcomes = [o for o in outcomes if o.get("key") in allowed_keys]
+            issue_summaries.update({o.get("key"): o.get("summary") for o in outcomes})
+            print(f"[scan] discovered {len(outcomes)} Outcomes, fetching field data concurrently...")
+            outcome_raw_by_key = await _fetch_raw_concurrent([o.get("key") for o in outcomes])
+            print(f"[scan] fetching linked stories for {len(outcomes)} Outcomes concurrently...")
+            outcome_linked_by_key = await _linked_issues_concurrent(session, [o.get("key") for o in outcomes])
+            for _linked_list in outcome_linked_by_key.values():
+                issue_summaries.update({i.get("key"): i.get("summary") for i in _linked_list})
+            outcome_field_map = _effective_field_map("outcome")
+
+            for outcome in outcomes:
+                outcome_key = outcome.get("key")
+                outcome_status = (outcome.get("status") or {}).get("name")
+                _ensure_classified("outcome", outcome_status)
+
+                raw = outcome_raw_by_key.get(outcome_key)
+                if raw is not None:
+                    outcome_findings = field_rules.check_outcome_fields(raw.get("fields", {}), outcome_status, field_map=outcome_field_map)
+                    field_findings_by_entity.append(("outcome", outcome_key, outcome_status, outcome_findings))
+                    scrum_team = field_rules._value(raw.get("fields", {}), SCRUM_TEAM_FIELD_ID)
+                    if scrum_team:
+                        issue_scrum_teams[outcome_key] = scrum_team
+                    issue_status_snapshot[outcome_key] = {"entity_type": "outcome", "status": outcome_status, "jira_updated_at": raw.get("fields", {}).get("updated"), "assignee": _get_assignee_name(raw.get("fields", {}))}
+
+                outcome_linked = [i for i in outcome_linked_by_key.get(outcome_key, []) if i.get("key") in allowed_keys]
+
+                for issue in outcome_linked:
+                    if (issue.get("issue_type") or {}).get("name") != "Story":
+                        continue
+                    story_key = issue.get("key")
+                    story_status = (issue.get("status") or {}).get("name")
+                    verdict = compliance_rules.evaluate_outcome(story_status, outcome_status)
+                    outcome_results.append({
+                        "pair_type": "story_outcome",
+                        "cr_key": story_key, "cr_status": story_status,
+                        "story_key": outcome_key, "story_status": outcome_status,
+                        "compliant": verdict["compliant"], "reason": verdict["reason"],
+                        "severity": verdict["severity"], "score": verdict["score"],
+                    })
+
+                # Outcome <- Epic bottleneck check: an Epic's parent is
+                # an Outcome (additive to the Story<->Outcome relationship
+                # above — a Story linking to an Outcome and an Epic's
+                # parent being that same Outcome are two separate real
+                # relationships, not alternatives to each other).
                 epic_entries = outcome_to_epic_entries.get(outcome_key, [])
                 epic_verdict = compliance_rules.evaluate_outcome_epic(outcome_status, epic_entries)
-                if epic_verdict["bottleneck_epic_key"] is None:
-                    continue
-                outcome_epic_results.append({
-                    "pair_type": "outcome_epic",
-                    "cr_key": epic_verdict["bottleneck_epic_key"], "cr_status": epic_verdict["bottleneck_epic_status"],
-                    "story_key": outcome_key, "story_status": outcome_status,
-                    "compliant": epic_verdict["compliant"], "reason": epic_verdict["reason"],
-                    "severity": epic_verdict["severity"], "score": epic_verdict["score"],
-                })
-
+                if epic_verdict["bottleneck_epic_key"] is not None:
+                    outcome_epic_results.append({
+                        "pair_type": "outcome_epic",
+                        "cr_key": epic_verdict["bottleneck_epic_key"], "cr_status": epic_verdict["bottleneck_epic_status"],
+                        "story_key": outcome_key, "story_status": outcome_status,
+                        "compliant": epic_verdict["compliant"], "reason": epic_verdict["reason"],
+                        "severity": epic_verdict["severity"], "score": epic_verdict["score"],
+                    })
 
     run_id = compliance_db.save_run(results)
     if epic_results:
@@ -1080,22 +988,22 @@ async def _run_full_scan(project_key=None, board_id=None):
         compliance_db.save_additional_checks(run_id, outcome_epic_results, "outcome_epic")
     compliance_db.save_issue_summaries(issue_summaries)
     compliance_db.save_issue_scrum_teams(issue_scrum_teams)
+    compliance_db.save_issue_status_snapshot(issue_status_snapshot)
+    compliance_db.save_scan_totals(run_id, {"cr": len(crs), "epic": len(epics), "outcome": len(outcomes)})
     for entity_type, entity_key, entity_status, findings in field_findings_by_entity:
         compliance_db.save_field_findings(field_run_id, entity_type, entity_key, entity_status, findings)
 
     elapsed = _time.time() - scan_start
     print(f"[scan] completed in {elapsed:.1f}s — "
           f"{len(set(r['cr_key'] for r in results))} CRs, {len(results)} story checks, "
-          f"{len(epic_results)} epic checks, {len(outcome_results)} story-outcome checks, {len(outcome_epic_results)} outcome-epic checks, "
+          f"{len(epic_results)} epic checks, {len(outcome_results)} outcome checks, "
           f"{len(field_findings_by_entity)} entities field-checked")
 
     return {
         "crs_scanned": len(set(r["cr_key"] for r in results)),
         "stories_scanned": len(results),
-        "epics_scanned": len(epics),
-        "outcomes_scanned": len(outcome_status_by_key),
-        "story_outcome_pairs_scanned": len(outcome_results),
-        "outcome_epic_pairs_scanned": len(outcome_epic_results),
+        "epics_scanned": len(epic_results),
+        "outcomes_scanned": len(outcome_results),
         "field_entities_scanned": len(field_findings_by_entity),
         "field_findings_total": sum(len(f) for _, _, _, f in field_findings_by_entity),
         "scan_seconds": round(elapsed, 1),
@@ -1147,7 +1055,7 @@ def get_outcome_epic_findings():
     run_id = compliance_db.latest_run_id()
     if not run_id:
         return jsonify([])
-    return jsonify(compliance_db.get_pair_findings(run_id, "outcome_epic", include_compliant=True))
+    return jsonify(compliance_db.get_pair_findings(run_id, "outcome_epic"))
 
 
 @app.route("/api/pairs/story-outcome", methods=["GET"])
@@ -1155,7 +1063,7 @@ def get_story_outcome_findings():
     run_id = compliance_db.latest_run_id()
     if not run_id:
         return jsonify([])
-    return jsonify(compliance_db.get_pair_findings(run_id, "story_outcome", include_compliant=True))
+    return jsonify(compliance_db.get_pair_findings(run_id, "story_outcome"))
 
 
 @app.route("/api/fields/findings", methods=["GET"])
@@ -1377,12 +1285,9 @@ def dashboard_refresh():
 @app.route("/api/config", methods=["GET"])
 def get_frontend_config():
     jira_url = os.environ.get("JIRA_URL", "").rstrip("/")
-    # Default to 'ACC' project if DEFAULT_PROJECT_KEY is not explicitly set
-    default_project = os.environ.get("DEFAULT_PROJECT_KEY", "ACC")
-    app.logger.info("Frontend config: jira_url=%s default_project_key=%s", jira_url, default_project)
     return jsonify({
         "jira_base": f"{jira_url}/browse/" if jira_url else "",
-        "default_project_key": default_project,
+        "default_project_key": os.environ.get("DEFAULT_PROJECT_KEY", ""),
     })
 
 
@@ -1404,7 +1309,7 @@ def list_boards():
         return jsonify({"error": f"Could not fetch boards: {e}"}), 500
     # Dropdown only ever offers the same boards the scan is restricted to
     # (ALLOWED_BOARD_NAMES) — never a choice that would return nothing.
-    #boards = [b for b in boards if b.get("name") in ALLOWED_BOARD_NAMES]
+    boards = [b for b in boards if b.get("name") in ALLOWED_BOARD_NAMES]
     return jsonify({"items": boards})
 
 
@@ -1417,6 +1322,280 @@ def dashboard_summary():
 def dashboard_trend():
     days = int(request.args.get("days", 14))
     return jsonify(compliance_db.get_trend(days))
+
+
+STALE_DAYS = int(os.environ.get("STALE_DAYS", 10))
+
+
+def _get_assignee_name(fields):
+    """Extracts a display name for the assignee, defensively — Jira's
+    standard REST shape (CR/Epic/Outcome, via direct fetch) is
+    {"assignee": {"displayName": "...", ...}} or null if unassigned,
+    but mcp-atlassian's search results (Story) haven't been confirmed
+    to carry assignee in exactly the same shape, so this tries a few
+    reasonable variants rather than assuming and silently getting None
+    for every Story. Returns None if truly absent or unassigned -
+    worth verifying against real scan data once deployed."""
+    assignee = fields.get("assignee") if fields else None
+    if not assignee:
+        return None
+    if isinstance(assignee, str):
+        return assignee
+    if isinstance(assignee, dict):
+        return assignee.get("displayName") or assignee.get("display_name") or assignee.get("name")
+    return None
+
+
+def _parse_jira_updated(raw_value):
+    """Jira's 'updated' field comes in two different formats depending
+    on which path fetched it: the direct REST API (CR/Epic/Outcome, via
+    jira_rest.get_issue_raw) returns full ISO8601 with a timezone offset
+    ("2026-08-01T10:00:00.000+0000"), while mcp-atlassian's search tool
+    (Story, via linkedIssues()) returns a plain space-separated datetime
+    with no timezone ("2026-08-01 10:00:00"). Tries both rather than
+    assuming one — returns a naive UTC-ish datetime, or None if neither
+    parses (never raises, since a bad date shouldn't break the endpoint)."""
+    if not raw_value:
+        return None
+    import datetime as _dt
+    try:
+        return _dt.datetime.strptime(raw_value[:19], "%Y-%m-%dT%H:%M:%S")
+    except Exception:
+        pass
+    try:
+        return _dt.datetime.strptime(raw_value[:19], "%Y-%m-%d %H:%M:%S")
+    except Exception:
+        return None
+
+
+_SEV_RANK = {"Critical": 3, "High": 2, "Medium": 1, "Low": 0}
+
+
+def _severity_by_key(run_id):
+    """Worst severity per issue key, combining field-completeness
+    findings and phase-mismatch checks (as the dependent side) —
+    whichever is worse wins, since an issue can appear in both. Shared
+    by the overview and capacity endpoints rather than computed twice."""
+    severity_by_key = {}
+    for f in compliance_db.get_latest_field_findings():
+        k, s = f.get("entity_key"), f.get("severity")
+        if s in _SEV_RANK and (k not in severity_by_key or _SEV_RANK[s] > _SEV_RANK[severity_by_key[k]]):
+            severity_by_key[k] = s
+    if run_id:
+        for pt in ("cr_story", "epic_cr", "story_outcome", "outcome_epic"):
+            for row in compliance_db.get_pair_findings(run_id, pt):
+                dep_key = row["cr_key"] if pt == "outcome_epic" else row["story_key"]
+                s = row.get("severity")
+                if s in _SEV_RANK and (dep_key not in severity_by_key or _SEV_RANK[s] > _SEV_RANK[severity_by_key[dep_key]]):
+                    severity_by_key[dep_key] = s
+    return severity_by_key
+
+
+@app.route("/api/scrum-master/overview", methods=["GET"])
+def scrum_master_overview():
+    """Aggregate-first metrics for the Scrum Master view — every number
+    here is a count or a grouping, never a per-item list, since this is
+    built to stay usable at 10k+ tracked items. Drill-down (the actual
+    item lists) is a separate, paginated concern this endpoint doesn't
+    attempt."""
+    import datetime as _dt
+
+    run_id = compliance_db.latest_run_id()
+    snapshot = compliance_db.get_issue_status_snapshot()
+    scrum_teams = compliance_db.get_issue_scrum_teams()
+
+    tracked_items = len(snapshot)
+    now = _dt.datetime.utcnow()
+    blocked_count = 0
+    stale_count = 0
+    for row in snapshot:
+        status = (row.get("status") or "").upper()
+        if "BLOCKED" in status:
+            blocked_count += 1
+        updated = _parse_jira_updated(row.get("jira_updated_at"))
+        if updated and (now - updated).days > STALE_DAYS:
+            stale_count += 1
+
+    severity_by_key = _severity_by_key(run_id)
+    sev_rank = _SEV_RANK
+
+    at_risk_keys = set(severity_by_key.keys())
+    total_checked, total_non_compliant = 0, 0
+    if run_id:
+        for pt in ("cr_story", "epic_cr", "story_outcome", "outcome_epic"):
+            counts = compliance_db.get_pair_counts(run_id, pt)
+            total_checked += counts["total"]
+            total_non_compliant += counts["non_compliant"]
+            for row in compliance_db.get_pair_findings(run_id, pt):
+                dep_key = row["cr_key"] if pt == "outcome_epic" else row["story_key"]
+                at_risk_keys.add(dep_key)
+
+    field_total = sum(compliance_db.get_latest_scan_totals().values())
+    checked = max(tracked_items, total_checked + field_total)
+    compliance_rate = round(((checked - len(at_risk_keys)) / checked) * 100) if checked else None
+
+    # Heatmap: team x severity
+    heatmap = {}
+    for key, sev in severity_by_key.items():
+        team = scrum_teams.get(key)
+        if not team:
+            continue
+        heatmap.setdefault(team, {"Low": 0, "Medium": 0, "High": 0, "Critical": 0})
+        heatmap[team][sev] += 1
+
+    # Top blockers grouped by entity type (a coarse grouping — Jira's
+    # "Blocked by/Dependency" is free text, not a clean category, so
+    # this doesn't attempt reason-level grouping yet)
+    blockers_by_type = {}
+    for row in snapshot:
+        if "BLOCKED" in (row.get("status") or "").upper():
+            et = row.get("entity_type", "unknown")
+            blockers_by_type[et] = blockers_by_type.get(et, 0) + 1
+
+    # Leaderboard
+    leaderboard = []
+    if run_id:
+        team_stats = compliance_db.get_team_compliance_snapshot(run_id)
+        for team, stats in team_stats.items():
+            rate = round(((stats["total"] - stats["non_compliant"]) / stats["total"]) * 100) if stats["total"] else 0
+            leaderboard.append({"team": team, "compliance_rate": rate, "total_checked": stats["total"]})
+        leaderboard.sort(key=lambda x: x["compliance_rate"], reverse=True)
+
+    return jsonify({
+        "tracked_items": tracked_items,
+        "at_risk": len(at_risk_keys),
+        "blocked": blocked_count,
+        "stale": stale_count,
+        "stale_threshold_days": STALE_DAYS,
+        "compliance_rate": compliance_rate,
+        "heatmap": heatmap,
+        "top_blockers_by_type": blockers_by_type,
+        "leaderboard": leaderboard,
+    })
+
+
+@app.route("/api/scrum-master/capacity", methods=["GET"])
+def scrum_master_capacity():
+    """Per-person workload, grouped by Scrum Team. Deliberately NOT a
+    score or ranking — flags a person as 'worth a check-in' via a
+    simple, inspectable threshold rule, not a weighted formula, so it
+    never gets mistaken for an evaluation number."""
+    run_id = compliance_db.latest_run_id()
+    snapshot = compliance_db.get_issue_status_snapshot()
+    scrum_teams = compliance_db.get_issue_scrum_teams()
+    severity_by_key = _severity_by_key(run_id)
+
+    import datetime as _dt
+    now = _dt.datetime.utcnow()
+
+    people = {}
+    for row in snapshot:
+        assignee = row.get("assignee")
+        if not assignee:
+            continue
+        key = row["issue_key"]
+        p = people.setdefault(assignee, {
+            "assignee": assignee, "team": scrum_teams.get(key), "wip": 0,
+            "blocked": 0, "stale": 0, "critical_high": 0,
+        })
+        p["wip"] += 1
+        if p["team"] is None and scrum_teams.get(key):
+            p["team"] = scrum_teams.get(key)
+        status = (row.get("status") or "").upper()
+        if "BLOCKED" in status:
+            p["blocked"] += 1
+        updated = _parse_jira_updated(row.get("jira_updated_at"))
+        if updated and (now - updated).days > STALE_DAYS:
+            p["stale"] += 1
+        sev = severity_by_key.get(key)
+        if sev in ("Critical", "High"):
+            p["critical_high"] += 1
+
+    people_list = []
+    for p in people.values():
+        p["flagged"] = p["blocked"] >= 3 or (p["stale"] >= 2 and p["critical_high"] >= 3)
+        people_list.append(p)
+    people_list.sort(key=lambda p: (not p["flagged"], -p["blocked"], -p["stale"]))
+
+    total_wip = sum(p["wip"] for p in people_list)
+    avg_wip = round(total_wip / len(people_list), 1) if people_list else 0
+    over_capacity = sum(1 for p in people_list if p["wip"] > avg_wip * 1.5) if people_list else 0
+
+    return jsonify({
+        "total_wip": total_wip,
+        "avg_wip_per_person": avg_wip,
+        "people_over_capacity": over_capacity,
+        "blocked_items_total": sum(p["blocked"] for p in people_list),
+        "people": people_list,
+    })
+
+
+
+@app.route("/api/dashboard/combined-metrics", methods=["GET"])
+def combined_metrics():
+    """Blended metrics across BOTH phase-mismatch and field-issue data
+    for one tab — used by the Epic and Outcome tabs, which show both
+    kinds of tables. Computed server-side because the frontend never
+    sees full-population data (every findings endpoint only returns
+    flagged/non-compliant rows) — this reads the underlying checks
+    table directly, bypassing that restriction, to get real totals."""
+    tab = request.args.get("tab")
+    if tab not in ("epic", "outcome"):
+        return jsonify({"error": "tab must be 'epic' or 'outcome'"}), 400
+
+    empty = {
+        "checked": 0, "total_issues": 0, "compliance_rate": None,
+        "issue_mix": {"phase_pct": 0, "field_pct": 0},
+        "severity_by_type": {"phase": {"Critical": 0, "High": 0, "Medium": 0, "Low": 0},
+                              "field": {"Critical": 0, "High": 0, "Medium": 0, "Low": 0}},
+    }
+    run_id = compliance_db.latest_run_id()
+    if not run_id:
+        return jsonify(empty)
+
+    totals = compliance_db.get_latest_scan_totals()
+    field_total = totals.get(tab, 0)
+
+    if tab == "epic":
+        pair_types = ["epic_cr"]
+    else:
+        pair_types = ["outcome_epic", "story_outcome"]
+
+    phase_total = 0
+    phase_non_compliant = 0
+    sev_phase = {"Critical": 0, "High": 0, "Medium": 0, "Low": 0}
+    for pt in pair_types:
+        counts = compliance_db.get_pair_counts(run_id, pt)
+        phase_total += counts["total"]
+        phase_non_compliant += counts["non_compliant"]
+        for row in compliance_db.get_pair_findings(run_id, pt):
+            if row["severity"] in sev_phase:
+                sev_phase[row["severity"]] += 1
+
+    field_findings = compliance_db.get_latest_field_findings(entity_type=tab)
+    field_issue_entities = len(set(f["entity_key"] for f in field_findings))
+    field_issue_count = len(field_findings)
+    sev_field = {"Critical": 0, "High": 0, "Medium": 0, "Low": 0}
+    for f in field_findings:
+        if f["severity"] in sev_field:
+            sev_field[f["severity"]] += 1
+
+    checked = phase_total + field_total
+    non_compliant = phase_non_compliant + field_issue_entities
+    total_issues = phase_non_compliant + field_issue_count
+    compliance_rate = round(((checked - non_compliant) / checked) * 100) if checked else None
+    phase_pct = round((phase_non_compliant / total_issues) * 100) if total_issues else 0
+    field_pct = (100 - phase_pct) if total_issues else 0
+
+    return jsonify({
+        "checked": checked,
+        "checked_breakdown": {"phase_pairs": phase_total, "field_entities": field_total},
+        "total_issues": total_issues,
+        "total_issues_breakdown": {"phase": phase_non_compliant, "field": field_issue_count},
+        "compliance_rate": compliance_rate,
+        "issue_mix": {"phase_pct": phase_pct, "field_pct": field_pct},
+        "severity_by_type": {"phase": sev_phase, "field": sev_field},
+    })
 
 
 @app.route("/api/dashboard/breakdown", methods=["GET"])
@@ -1455,12 +1634,12 @@ def dashboard_unresolve():
 # Scheduler: re-run the full scan on an interval so the dashboard reflects
 # near-real-time state without the user manually clicking refresh.
 # ---------------------------------------------------------------------------
-def start_scheduler1():
+def start_scheduler():
     from apscheduler.schedulers.background import BackgroundScheduler
     interval_minutes = int(os.environ.get("SCAN_INTERVAL_MINUTES", 15))
     retention_days = int(os.environ.get("RETENTION_DAYS", 7))
 
-    def scan_and_prune1():
+    def scan_and_prune():
         run_async(_run_full_scan())
         pruned = compliance_db.prune_old_runs(keep_days=retention_days)
         if pruned["pruned_runs"] > 0:
@@ -1474,62 +1653,7 @@ def start_scheduler1():
     scan_and_prune()
     return scheduler
 
-def start_scheduler():
-    from apscheduler.schedulers.background import BackgroundScheduler
 
-    interval_minutes = int(os.environ.get("SCAN_INTERVAL_MINUTES", 15))
-    retention_days = int(os.environ.get("RETENTION_DAYS", 7))
-
-    def scan_and_prune():
-        try:
-            print("[scheduler] Starting scheduled scan...")
-            run_async(_run_full_scan())
-
-            pruned = compliance_db.prune_old_runs(
-                keep_days=retention_days
-            )
-
-            if pruned["pruned_runs"] > 0:
-                print(
-                    f"[retention] pruned "
-                    f"{pruned['pruned_runs']} runs older than "
-                    f"{retention_days} days"
-                )
-
-        except Exception as e:
-            app.logger.exception(
-                "[scheduler] Scan failed: %s", e
-            )
-
-    scheduler = BackgroundScheduler()
-
-    scheduler.add_job(
-        scan_and_prune,
-        "interval",
-        minutes=interval_minutes,
-        id="compliance_scan",
-        replace_existing=True,
-    )
-
-    scheduler.add_job(
-        compliance_db.vacuum,
-        "interval",
-        hours=24,
-        id="database_vacuum",
-        replace_existing=True,
-    )
-
-    scheduler.start()
-
-    # IMPORTANT:
-    # Do NOT run scan_and_prune() here.
-    # The first scan will happen after SCAN_INTERVAL_MINUTES.
-    print(
-        f"[scheduler] Started. First scan in "
-        f"{interval_minutes} minutes."
-    )
-
-    return scheduler
 # ---------------------------------------------------------------------------
 # AI layer: draft a remediation comment via a local LLM (Ollama). This never
 # writes to Jira on its own — it only returns text for a human to review.
@@ -1621,22 +1745,36 @@ def dashboard():
     return send_from_directory(os.path.join(app.static_folder, "react"), "index.html")
 
 
-if __name__ == "__main__":
-    #start_scheduler()
+@app.route("/scrum-master")
+def scrum_master_view():
+    """Standalone page, deliberately separate from the React app — not
+    yet linked from the main dashboard's nav. Self-contained HTML/JS,
+    no build step, fetches /api/scrum-master/overview directly."""
+    return send_from_directory(app.static_folder, "scrum_master.html")
 
+
+@app.route("/api-docs")
+def api_docs():
+    """Swagger UI, loaded from CDN — no new pip dependency, avoids
+    another Docker dependency-resolution risk for something purely
+    documentation-facing."""
+    return send_from_directory(app.static_folder, "api-docs.html")
+
+
+@app.route("/openapi.json")
+def openapi_spec():
+    return send_from_directory(app.static_folder, "openapi.json")
+
+
+if __name__ == "__main__":
     # avoid starting the scheduler twice under Flask's debug reloader
-    #if os.environ.get("WERKZEUG_RUN_MAIN") != "true" and not app.debug:
-        #start_scheduler()
-    #elif os.environ.get("WERKZEUG_RUN_MAIN") == "true":
-        #start_scheduler()
+    if os.environ.get("WERKZEUG_RUN_MAIN") != "true" and not app.debug:
+        start_scheduler()
+    elif os.environ.get("WERKZEUG_RUN_MAIN") == "true":
+        start_scheduler()
     # threaded=True lets the server handle multiple requests at once —
     # without it, the dashboard's 6 parallel fetch() calls (loadAll())
     # get serialized one at a time server-side, adding their individual
     # latencies together instead of overlapping. This was the actual
     # cause of "scan finishes fine, but the display update lags."
-    app.run(
-        host="0.0.0.0",
-        port=5000,
-        debug=True,
-        threaded=True
-    )
+    app.run(host="0.0.0.0", port=5000, debug=True, threaded=True)
