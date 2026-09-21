@@ -1,0 +1,1460 @@
+{
+  "openapi": "3.0.0",
+  "info": {
+    "title": "Compliance Dashboard API",
+    "version": "1.0.0",
+    "description": "Jira compliance monitoring API \u2014 tracks phase alignment across the Outcome -> Epic -> CR -> Story hierarchy, field completeness, and Scrum-Master-facing aggregate metrics. Scoped to boards configured via ALLOWED_BOARD_NAMES."
+  },
+  "servers": [
+    {
+      "url": "/",
+      "description": "This deployment"
+    }
+  ],
+  "tags": [
+    {
+      "name": "Dashboard",
+      "description": "Compliance dashboard: scanning, summaries, trends"
+    },
+    {
+      "name": "Pairs",
+      "description": "Phase-mismatch results between two entity types"
+    },
+    {
+      "name": "Fields",
+      "description": "Field-completeness checks (CR/Epic/Outcome)"
+    },
+    {
+      "name": "Entities",
+      "description": "Per-issue current field values"
+    },
+    {
+      "name": "Jira",
+      "description": "Direct Jira read/write (projects, boards, transitions, field updates)"
+    },
+    {
+      "name": "Issues",
+      "description": "Issue metadata lookups (titles, descriptions, Scrum Team)"
+    },
+    {
+      "name": "Mappings",
+      "description": "AI-learned status mappings and human review"
+    },
+    {
+      "name": "AI",
+      "description": "AI-drafted remediation comments (via AWS Bedrock)"
+    },
+    {
+      "name": "Scrum Master",
+      "description": "Aggregate, 10k+-scale-safe metrics for Scrum Masters"
+    },
+    {
+      "name": "Config",
+      "description": "Frontend configuration"
+    },
+    {
+      "name": "Legacy/Debug",
+      "description": "Early scaffolding and raw MCP passthrough endpoints \u2014 not used by either UI"
+    }
+  ],
+  "paths": {
+    "/api/dashboard/summary": {
+      "get": {
+        "summary": "Latest scan summary",
+        "tags": [
+          "Dashboard"
+        ],
+        "description": "Active (non-compliant) Story-CR pairs from the most recent scan.",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "active": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "pair_type": {
+                            "type": "string"
+                          },
+                          "cr_key": {
+                            "type": "string"
+                          },
+                          "cr_status": {
+                            "type": "string"
+                          },
+                          "story_key": {
+                            "type": "string"
+                          },
+                          "story_status": {
+                            "type": "string"
+                          },
+                          "compliant": {
+                            "type": "boolean"
+                          },
+                          "reason": {
+                            "type": "string"
+                          },
+                          "severity": {
+                            "type": "string",
+                            "enum": [
+                              "Critical",
+                              "High",
+                              "Medium",
+                              "Low"
+                            ]
+                          },
+                          "score": {
+                            "type": "integer"
+                          }
+                        }
+                      }
+                    },
+                    "checked_at": {
+                      "type": "number"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/dashboard/refresh": {
+      "post": {
+        "summary": "Trigger a full scan",
+        "tags": [
+          "Dashboard"
+        ],
+        "description": "Runs synchronously - the response only returns once the scan completes. Optionally scoped to one project/board.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "project_key": {
+                    "type": "string"
+                  },
+                  "board_id": {
+                    "type": "integer"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "crs_scanned": {
+                      "type": "integer"
+                    },
+                    "stories_scanned": {
+                      "type": "integer"
+                    },
+                    "epics_scanned": {
+                      "type": "integer"
+                    },
+                    "outcomes_scanned": {
+                      "type": "integer"
+                    },
+                    "field_entities_scanned": {
+                      "type": "integer"
+                    },
+                    "field_findings_total": {
+                      "type": "integer"
+                    },
+                    "scan_seconds": {
+                      "type": "number"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Scan failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/dashboard/trend": {
+      "get": {
+        "summary": "Compliance trend over time",
+        "tags": [
+          "Dashboard"
+        ],
+        "parameters": [
+          {
+            "name": "days",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            },
+            "description": "Default 14"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/api/dashboard/breakdown": {
+      "get": {
+        "summary": "Active mismatches grouped by reason/severity/CR",
+        "tags": [
+          "Dashboard"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/api/dashboard/combined-metrics": {
+      "get": {
+        "summary": "Blended phase+field metrics for one tab",
+        "tags": [
+          "Dashboard"
+        ],
+        "description": "Epic and Outcome tabs only - the only tabs with both phase-mismatch and field-issue data.",
+        "parameters": [
+          {
+            "name": "tab",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "'epic' or 'outcome'"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "checked": {
+                      "type": "integer"
+                    },
+                    "total_issues": {
+                      "type": "integer"
+                    },
+                    "compliance_rate": {
+                      "type": "integer",
+                      "nullable": true
+                    },
+                    "issue_mix": {
+                      "type": "object",
+                      "properties": {
+                        "phase_pct": {
+                          "type": "integer"
+                        },
+                        "field_pct": {
+                          "type": "integer"
+                        }
+                      }
+                    },
+                    "severity_by_type": {
+                      "type": "object"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "tab must be 'epic' or 'outcome'",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/dashboard/resolve": {
+      "post": {
+        "summary": "Manually mark a Story-CR pair resolved",
+        "tags": [
+          "Dashboard"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "story_key",
+                  "cr_key"
+                ],
+                "properties": {
+                  "story_key": {
+                    "type": "string"
+                  },
+                  "cr_key": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/api/dashboard/unresolve": {
+      "post": {
+        "summary": "Undo a manual resolution",
+        "tags": [
+          "Dashboard"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "story_key",
+                  "cr_key"
+                ],
+                "properties": {
+                  "story_key": {
+                    "type": "string"
+                  },
+                  "cr_key": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/api/dashboard/db-health": {
+      "get": {
+        "summary": "SQLite file size and retention setting",
+        "tags": [
+          "Dashboard"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/api/dashboard/prune": {
+      "post": {
+        "summary": "Manually prune scan runs older than N days",
+        "tags": [
+          "Dashboard"
+        ],
+        "parameters": [
+          {
+            "name": "days",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            },
+            "description": ""
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/api/pairs/epic-cr": {
+      "get": {
+        "summary": "Epic<->CR bottleneck results",
+        "tags": [
+          "Pairs"
+        ],
+        "description": "From the most recent scan run.",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "pair_type": {
+                        "type": "string"
+                      },
+                      "cr_key": {
+                        "type": "string"
+                      },
+                      "cr_status": {
+                        "type": "string"
+                      },
+                      "story_key": {
+                        "type": "string"
+                      },
+                      "story_status": {
+                        "type": "string"
+                      },
+                      "compliant": {
+                        "type": "boolean"
+                      },
+                      "reason": {
+                        "type": "string"
+                      },
+                      "severity": {
+                        "type": "string",
+                        "enum": [
+                          "Critical",
+                          "High",
+                          "Medium",
+                          "Low"
+                        ]
+                      },
+                      "score": {
+                        "type": "integer"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/pairs/outcome-epic": {
+      "get": {
+        "summary": "Outcome<->Epic bottleneck results",
+        "tags": [
+          "Pairs"
+        ],
+        "description": "From the most recent scan run.",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "pair_type": {
+                        "type": "string"
+                      },
+                      "cr_key": {
+                        "type": "string"
+                      },
+                      "cr_status": {
+                        "type": "string"
+                      },
+                      "story_key": {
+                        "type": "string"
+                      },
+                      "story_status": {
+                        "type": "string"
+                      },
+                      "compliant": {
+                        "type": "boolean"
+                      },
+                      "reason": {
+                        "type": "string"
+                      },
+                      "severity": {
+                        "type": "string",
+                        "enum": [
+                          "Critical",
+                          "High",
+                          "Medium",
+                          "Low"
+                        ]
+                      },
+                      "score": {
+                        "type": "integer"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/pairs/story-outcome": {
+      "get": {
+        "summary": "Story<->Outcome alignment results",
+        "tags": [
+          "Pairs"
+        ],
+        "description": "From the most recent scan run.",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "pair_type": {
+                        "type": "string"
+                      },
+                      "cr_key": {
+                        "type": "string"
+                      },
+                      "cr_status": {
+                        "type": "string"
+                      },
+                      "story_key": {
+                        "type": "string"
+                      },
+                      "story_status": {
+                        "type": "string"
+                      },
+                      "compliant": {
+                        "type": "boolean"
+                      },
+                      "reason": {
+                        "type": "string"
+                      },
+                      "severity": {
+                        "type": "string",
+                        "enum": [
+                          "Critical",
+                          "High",
+                          "Medium",
+                          "Low"
+                        ]
+                      },
+                      "score": {
+                        "type": "integer"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/fields/findings": {
+      "get": {
+        "summary": "Field-completeness findings",
+        "tags": [
+          "Fields"
+        ],
+        "parameters": [
+          {
+            "name": "entity_type",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "'cr', 'epic', or 'outcome' - omit for all"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "entity_key": {
+                        "type": "string"
+                      },
+                      "entity_type": {
+                        "type": "string"
+                      },
+                      "entity_status": {
+                        "type": "string"
+                      },
+                      "check": {
+                        "type": "string"
+                      },
+                      "field": {
+                        "type": "string"
+                      },
+                      "severity": {
+                        "type": "string",
+                        "enum": [
+                          "Critical",
+                          "High",
+                          "Medium",
+                          "Low"
+                        ]
+                      },
+                      "message": {
+                        "type": "string"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/fields/check": {
+      "post": {
+        "summary": "Ad-hoc single-issue field check",
+        "tags": [
+          "Fields"
+        ],
+        "description": "Live check, not from stored scan data.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "issue_key",
+                  "entity_type"
+                ],
+                "properties": {
+                  "issue_key": {
+                    "type": "string"
+                  },
+                  "entity_type": {
+                    "type": "string",
+                    "enum": [
+                      "cr",
+                      "outcome"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/api/entities/{entity_type}/{entity_key}/fields": {
+      "get": {
+        "summary": "Every tracked field's current value for one issue",
+        "tags": [
+          "Entities"
+        ],
+        "parameters": [
+          {
+            "name": "entity_type",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": ""
+          },
+          {
+            "name": "entity_key",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": ""
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/api/jira/projects": {
+      "get": {
+        "summary": "List Jira projects",
+        "tags": [
+          "Jira"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/api/jira/boards": {
+      "get": {
+        "summary": "List Jira boards",
+        "tags": [
+          "Jira"
+        ],
+        "description": "Filtered to ALLOWED_BOARD_NAMES.",
+        "parameters": [
+          {
+            "name": "project_key",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": ""
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/api/jira/transitions/{issue_key}": {
+      "get": {
+        "summary": "Available status transitions for one issue",
+        "tags": [
+          "Jira"
+        ],
+        "parameters": [
+          {
+            "name": "issue_key",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": ""
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/api/jira/transition": {
+      "post": {
+        "summary": "Apply a status transition",
+        "tags": [
+          "Jira"
+        ],
+        "description": "Triggers a background rescan afterward.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "issue_key",
+                  "transition_id"
+                ],
+                "properties": {
+                  "issue_key": {
+                    "type": "string"
+                  },
+                  "transition_id": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/api/jira/update-field": {
+      "post": {
+        "summary": "Update one custom field on an issue",
+        "tags": [
+          "Jira"
+        ],
+        "description": "Immediately re-checks and patches stored findings for this entity.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "issue_key",
+                  "entity_type",
+                  "field_key"
+                ],
+                "properties": {
+                  "issue_key": {
+                    "type": "string"
+                  },
+                  "entity_type": {
+                    "type": "string"
+                  },
+                  "field_key": {
+                    "type": "string"
+                  },
+                  "value": {}
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/api/issues/{issue_key}/description": {
+      "get": {
+        "summary": "Live title and description for one issue",
+        "tags": [
+          "Issues"
+        ],
+        "description": "Not from stored scan data - fetched on demand.",
+        "parameters": [
+          {
+            "name": "issue_key",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": ""
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/api/issues/summaries": {
+      "get": {
+        "summary": "Titles for all (or specified) tracked issues",
+        "tags": [
+          "Issues"
+        ],
+        "parameters": [
+          {
+            "name": "keys",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Comma-separated issue keys; omit for all"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/api/issues/scrum-teams": {
+      "get": {
+        "summary": "Scrum Team assignment for all (or specified) tracked issues",
+        "tags": [
+          "Issues"
+        ],
+        "parameters": [
+          {
+            "name": "keys",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Comma-separated issue keys; omit for all"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/api/mappings": {
+      "get": {
+        "summary": "All AI-learned and human-confirmed status mappings",
+        "tags": [
+          "Mappings"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/api/mappings/pending": {
+      "get": {
+        "summary": "AI-learned mappings awaiting human review",
+        "tags": [
+          "Mappings"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/api/mappings/override": {
+      "post": {
+        "summary": "Confirm or correct a status mapping",
+        "tags": [
+          "Mappings"
+        ],
+        "description": "Takes effect on the next scan.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "status_type",
+                  "raw_status",
+                  "target_status"
+                ],
+                "properties": {
+                  "status_type": {
+                    "type": "string"
+                  },
+                  "raw_status": {
+                    "type": "string"
+                  },
+                  "target_status": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/api/ai/draft-comment": {
+      "post": {
+        "summary": "Draft a remediation comment",
+        "tags": [
+          "AI"
+        ],
+        "description": "Never writes to Jira - returns text for review only.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "mode": {
+                    "type": "string",
+                    "enum": [
+                      "phase",
+                      "fields"
+                    ],
+                    "default": "phase"
+                  },
+                  "target_key": {
+                    "type": "string"
+                  },
+                  "other_key": {
+                    "type": "string"
+                  },
+                  "entity_key": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/api/ai/post-comment": {
+      "post": {
+        "summary": "Post a (human-reviewed) comment to Jira",
+        "tags": [
+          "AI"
+        ],
+        "description": "Only call after human review of the draft.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "story_key",
+                  "comment"
+                ],
+                "properties": {
+                  "story_key": {
+                    "type": "string"
+                  },
+                  "comment": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/api/scrum-master/overview": {
+      "get": {
+        "summary": "Aggregate Scrum Master metrics",
+        "tags": [
+          "Scrum Master"
+        ],
+        "description": "Counts and groupings only - safe at 10k+ scale, never returns per-item lists.",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "tracked_items": {
+                      "type": "integer"
+                    },
+                    "at_risk": {
+                      "type": "integer"
+                    },
+                    "blocked": {
+                      "type": "integer"
+                    },
+                    "stale": {
+                      "type": "integer"
+                    },
+                    "stale_threshold_days": {
+                      "type": "integer"
+                    },
+                    "compliance_rate": {
+                      "type": "integer",
+                      "nullable": true
+                    },
+                    "heatmap": {
+                      "type": "object",
+                      "description": "team -> {severity: count}"
+                    },
+                    "top_blockers_by_type": {
+                      "type": "object"
+                    },
+                    "leaderboard": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "team": {
+                            "type": "string"
+                          },
+                          "compliance_rate": {
+                            "type": "integer"
+                          },
+                          "total_checked": {
+                            "type": "integer"
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/config": {
+      "get": {
+        "summary": "Frontend configuration",
+        "tags": [
+          "Config"
+        ],
+        "description": "Jira browse URL and default project key.",
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/api/tools": {
+      "get": {
+        "summary": "List every MCP tool the jira-mcp server exposes",
+        "tags": [
+          "Legacy/Debug"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/api/call/{tool_name}": {
+      "post": {
+        "summary": "Call any MCP tool directly by name",
+        "tags": [
+          "Legacy/Debug"
+        ],
+        "description": "Raw passthrough - useful for exploring tool schemas.",
+        "parameters": [
+          {
+            "name": "tool_name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": ""
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/api/search": {
+      "get": {
+        "summary": "Raw JQL search via MCP",
+        "tags": [
+          "Legacy/Debug"
+        ],
+        "parameters": [
+          {
+            "name": "jql",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": ""
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/api/issues": {
+      "post": {
+        "summary": "Create an issue via MCP",
+        "tags": [
+          "Legacy/Debug"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "project_key",
+                  "summary",
+                  "issue_type"
+                ],
+                "properties": {
+                  "project_key": {
+                    "type": "string"
+                  },
+                  "summary": {
+                    "type": "string"
+                  },
+                  "issue_type": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/api/issues/{issue_key}": {
+      "get": {
+        "summary": "Get a single issue via MCP",
+        "tags": [
+          "Legacy/Debug"
+        ],
+        "parameters": [
+          {
+            "name": "issue_key",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": ""
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/api/issues/{issue_key}/comment": {
+      "post": {
+        "summary": "Add a comment via MCP",
+        "tags": [
+          "Legacy/Debug"
+        ],
+        "parameters": [
+          {
+            "name": "issue_key",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": ""
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "comment"
+                ],
+                "properties": {
+                  "comment": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/api/issues/{issue_key}/transition": {
+      "post": {
+        "summary": "Transition via MCP by name/id",
+        "tags": [
+          "Legacy/Debug"
+        ],
+        "description": "Superseded by /api/jira/transition, which uses direct REST instead.",
+        "parameters": [
+          {
+            "name": "issue_key",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": ""
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "transition"
+                ],
+                "properties": {
+                  "transition": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/api/scenario/create": {
+      "post": {
+        "summary": "Scaffolding: create Epic+Stories+CRs+links in one call",
+        "tags": [
+          "Legacy/Debug"
+        ],
+        "description": "Test-data generator, not used by either UI.",
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/api/scenario/discover": {
+      "get": {
+        "summary": "List MCP tools relevant to the scenario scaffolding",
+        "tags": [
+          "Legacy/Debug"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/api/scenario/mismatches": {
+      "get": {
+        "summary": "Early prototype of Epic-level mismatch checking",
+        "tags": [
+          "Legacy/Debug"
+        ],
+        "description": "Superseded by /api/pairs/epic-cr.",
+        "parameters": [
+          {
+            "name": "epic_key",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": ""
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/api/scenario/cr-mismatches": {
+      "get": {
+        "summary": "Early prototype of CR-level mismatch checking",
+        "tags": [
+          "Legacy/Debug"
+        ],
+        "description": "Superseded by the full scan.",
+        "parameters": [
+          {
+            "name": "cr_key",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": ""
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    }
+  }
+}
