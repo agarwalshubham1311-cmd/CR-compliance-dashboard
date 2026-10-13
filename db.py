@@ -233,19 +233,11 @@ def save_additional_checks(run_id, results, pair_type):
     conn.close()
 
 
-def get_pair_findings(run_id, pair_type, include_compliant=False):
-    """By default only non-compliant rows (the historical behavior every
-    existing caller relies on). Pass include_compliant=True to get every
-    row for this pair_type regardless of compliant status."""
+def get_pair_findings(run_id, pair_type):
     conn = get_conn()
-    if include_compliant:
-        rows = conn.execute(
-            "SELECT * FROM checks WHERE run_id = ? AND pair_type = ?", (run_id, pair_type)
-        ).fetchall()
-    else:
-        rows = conn.execute(
-            "SELECT * FROM checks WHERE run_id = ? AND pair_type = ? AND compliant = 0", (run_id, pair_type)
-        ).fetchall()
+    rows = conn.execute(
+        "SELECT * FROM checks WHERE run_id = ? AND pair_type = ? AND compliant = 0", (run_id, pair_type)
+    ).fetchall()
     conn.close()
     return [dict(r) for r in rows]
 
