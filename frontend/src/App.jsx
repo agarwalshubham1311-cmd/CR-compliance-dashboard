@@ -92,6 +92,12 @@ export default function App() {
   const [fieldReasonFilter, setFieldReasonFilter] = useState('all')
   const [sevFilter, setSevFilter] = useState('all')
   const [sortAsc, setSortAsc] = useState(false)
+  const [collapsedSections, setCollapsedSections] = useState({
+    outcomeEpicStatusMismatches: false,
+    epicFieldIssues: false,
+    crFieldIssues: false,
+    outcomeFieldIssues: false,
+  })
   const [draft, setDraft] = useState(null) // { forKey, text, statusMsg }
   const [titleModal, setTitleModal] = useState(null) // { key, summary, description, loading, error }
   const [statusChange, setStatusChange] = useState(null) // { forKey, transitions, selected, msg }
@@ -292,6 +298,10 @@ export default function App() {
     setScrumTeamFilter('all')
   }
 
+  function toggleSection(sectionKey) {
+    setCollapsedSections(prev => ({ ...prev, [sectionKey]: !prev[sectionKey] }))
+  }
+
   const cfg = TABS[currentTab]
   const epicFieldsCount = new Set([...data.epic.map(d => d.story_key), ...data.epicFields.map(f => f.entity_key)]).size
   const crCount = new Set(data.cr.map(f => f.entity_key)).size
@@ -309,21 +319,6 @@ export default function App() {
         </div>
       </div>
 
-      <div className="scope-filters">
-        <span className="scope-label">Project</span>
-        <select value={selectedProjectKey} onChange={e => onProjectChange(e.target.value)}>
-          {projects.length === 0 && <option value="">Loading...</option>}
-          {projects.map(p => <option key={p.key} value={p.key}>{p.key} — {p.name}</option>)}
-        </select>
-        <span className="scope-label">Jira board</span>
-        <select value={selectedBoardId} onChange={e => onBoardChange(e.target.value)} disabled={isLoadingBoards}>
-          <option value="">All boards</option>
-          {boards.map(b => <option key={b.id} value={b.id}>{b.name} ({b.type})</option>)}
-        </select>
-        <span className="scope-pill">
-          Scope: {selectedProjectKey || '—'} / {isLoadingBoards ? 'Loading boards...' : (selectedBoardId ? (boards.find(b => String(b.id) === String(selectedBoardId))?.name || selectedBoardId) : 'All boards')}
-        </span>
-      </div>
 
       <div className="tabs">
         {Object.entries(TABS).map(([key, t]) => {
@@ -379,6 +374,7 @@ export default function App() {
           entityType="cr" expandedKey={expandedKey} setExpandedKey={setExpandedKey}
           onDraft={draftFieldComment} fieldCache={fieldCache} onSaved={loadAll}
           title="Non-compliant CRs" jiraBase={jiraBase} summaries={summaries} scrumTeams={scrumTeams} scrumTeamFilter={scrumTeamFilter} onTitleClick={openTitleModal}
+          isCollapsed={collapsedSections.crFieldIssues} onToggleCollapse={() => toggleSection('crFieldIssues')}
         />
       )}
       {cfg.combined && data.epicFields.length > 0 && (
@@ -387,6 +383,7 @@ export default function App() {
           entityType="epic" expandedKey={epicFieldsExpandedKey} setExpandedKey={setEpicFieldsExpandedKey}
           onDraft={draftFieldComment} fieldCache={fieldCache} onSaved={loadAll}
           title="Field issues" jiraBase={jiraBase} summaries={summaries} scrumTeams={scrumTeams} scrumTeamFilter={scrumTeamFilter} onTitleClick={openTitleModal}
+          isCollapsed={collapsedSections.epicFieldIssues} onToggleCollapse={() => toggleSection('epicFieldIssues')}
         />
       )}
       {cfg.outcomeCombined && (
@@ -397,6 +394,7 @@ export default function App() {
             onResolve={resolveRow} onDraft={draftPhaseComment} onStatusChange={openStatusBox}
             statusChange={statusChange} onApplyStatus={applyStatusChange} onSelectTransition={selectTransition} onCloseStatus={() => setStatusChange(null)}
             title="Epic Status mismatches" jiraBase={jiraBase} summaries={summaries} scrumTeams={scrumTeams} scrumTeamFilter={scrumTeamFilter} onTitleClick={openTitleModal}
+            isCollapsed={collapsedSections.outcomeEpicStatusMismatches} onToggleCollapse={() => toggleSection('outcomeEpicStatusMismatches')}
           />}
           {data.outcome.length > 0 && <PhaseTable
             cfg={cfg} rows={data.outcome} reasonFilter={reasonFilter} sevFilter={sevFilter}
@@ -410,6 +408,7 @@ export default function App() {
             entityType="outcome" expandedKey={outcomeFieldsExpandedKey} setExpandedKey={setOutcomeFieldsExpandedKey}
             onDraft={draftFieldComment} fieldCache={fieldCache} onSaved={loadAll}
             title="Field issues" jiraBase={jiraBase} summaries={summaries} scrumTeams={scrumTeams} scrumTeamFilter={scrumTeamFilter} onTitleClick={openTitleModal}
+            isCollapsed={collapsedSections.outcomeFieldIssues} onToggleCollapse={() => toggleSection('outcomeFieldIssues')}
           />}
         </>
       )}
@@ -507,59 +506,29 @@ function Pagination({ page, setPage, totalItems, pageSize = PAGE_SIZE }) {
 
 function Cards({ tab, data }) {
   const cfg = TABS[tab]
-  const [combined, setCombined] = useState(null)
-
-  useEffect(() => {
-    if (cfg.combined || cfg.outcomeCombined) {
-      let cancelled = false
-      fetchJSON(`/api/dashboard/combined-metrics?tab=${tab}`).then(result => {
-        if (!cancelled && !result.error) setCombined(result)
-      })
-      return () => { cancelled = true }
-    } else {
-      setCombined(null)
-    }
-  }, [tab, data])
-
-  if ((cfg.combined || cfg.outcomeCombined)) {
-    if (!combined) return <div className="cards"><div className="card"><p className="label">Loading...</p></div></div>
-    return (
-      <div className="cards">
-        <div className="card">
-          <p className="label">Checked</p>
-          <p className="value">{combined.checked}</p>
-          <p className="sublabel">{combined.checked_breakdown.field_entities} entities + {combined.checked_breakdown.phase_pairs} pairs</p>
-        </div>
-        <div className="card danger">
-          <p className="label">Total issues</p>
-          <p className="value">{combined.total_issues}</p>
-          <p className="sublabel">{combined.total_issues_breakdown.phase} phase + {combined.total_issues_breakdown.field} field</p>
-        </div>
-        <div className="card">
-          <p className="label">Compliance rate</p>
-          <p className="value">{combined.compliance_rate === null ? '-' : combined.compliance_rate + '%'}</p>
-          <p className="sublabel">combined, both types</p>
-        </div>
-        <div className="card">
-          <p className="label">Issue mix</p>
-          <div className="mix-bar">
-            <div className="mix-bar-phase" style={{ width: combined.issue_mix.phase_pct + '%' }}></div>
-            <div className="mix-bar-field" style={{ width: combined.issue_mix.field_pct + '%' }}></div>
-          </div>
-          <p className="sublabel"><span className="mix-label-phase">{combined.issue_mix.phase_pct}% phase</span> {combined.issue_mix.field_pct}% field</p>
-        </div>
-      </div>
-    )
-  }
-
   let checked, nonCompliant, critHigh, total
   if (cfg.fieldTab) {
     const entities = new Set(data.cr.map(f => f.entity_key))
     checked = entities.size; nonCompliant = entities.size
     critHigh = data.cr.filter(f => f.severity === 'High').length
     total = data.cr.length
+  } else if (cfg.outcomeCombined) {
+    const phaseRows = getOutcomePhaseRows(data)
+    const checkedKeys = new Set([
+      ...phaseRows.map(r => r.rightKey).filter(Boolean),
+      ...data.outcomeFields.map(f => f.entity_key).filter(Boolean),
+    ])
+    const nonCompliantKeys = new Set([
+      ...phaseRows.filter(r => r.severity).map(r => r.rightKey).filter(Boolean),
+      ...data.outcomeFields.map(f => f.entity_key).filter(Boolean),
+    ])
+    checked = checkedKeys.size
+    nonCompliant = nonCompliantKeys.size
+    critHigh = phaseRows.filter(r => r.severity === 'Critical' || r.severity === 'High').length +
+      data.outcomeFields.filter(f => f.severity === 'Critical' || f.severity === 'High').length
+    total = phaseRows.length + data.outcomeFields.length
   } else {
-    const rows = data[tab].map(cfg.getRows)
+    const rows = (cfg.combined ? data.epic : data[tab]).map(cfg.getRows)
     checked = rows.length; nonCompliant = rows.length
     critHigh = rows.filter(r => r.severity === 'Critical' || r.severity === 'High').length
     total = rows.length
@@ -576,59 +545,6 @@ function Cards({ tab, data }) {
 
 function Charts({ tab, data }) {
   const cfg = TABS[tab]
-  const [combined, setCombined] = useState(null)
-
-  useEffect(() => {
-    if (cfg.combined || cfg.outcomeCombined) {
-      let cancelled = false
-      fetchJSON(`/api/dashboard/combined-metrics?tab=${tab}`).then(result => {
-        if (!cancelled && !result.error) setCombined(result)
-      })
-      return () => { cancelled = true }
-    } else {
-      setCombined(null)
-    }
-  }, [tab, data])
-
-  if (cfg.combined || cfg.outcomeCombined) {
-    if (!combined) return <div className="charts"><div className="chart-box"><p className="title">Loading...</p></div></div>
-    const sevLabels = ['Critical', 'High', 'Medium', 'Low']
-    const sevTotals = sevLabels.map(s => (combined.severity_by_type.phase[s] || 0) + (combined.severity_by_type.field[s] || 0))
-    const sevPieData = sevLabels.map((name, i) => ({ name, value: sevTotals[i] })).filter(d => d.value > 0)
-    const byTypeData = sevLabels.map(s => ({
-      name: s,
-      Phase: combined.severity_by_type.phase[s] || 0,
-      Field: combined.severity_by_type.field[s] || 0,
-    }))
-    return (
-      <div className="charts">
-        <div className="chart-box">
-          <p className="title">Severity — combined</p>
-          <ResponsiveContainer width="100%" height="85%">
-            <PieChart>
-              <Pie data={sevPieData} dataKey="value" nameKey="name" innerRadius={35} outerRadius={60}>
-                {sevPieData.map((entry, i) => <Cell key={i} fill={SEV_COLORS[entry.name]} />)}
-              </Pie>
-              <Tooltip />
-            </PieChart>
-          </ResponsiveContainer>
-        </div>
-        <div className="chart-box">
-          <p className="title">Issues by type and severity</p>
-          <ResponsiveContainer width="100%" height="85%">
-            <BarChart data={byTypeData}>
-              <XAxis dataKey="name" tick={{ fontSize: 10 }} />
-              <YAxis allowDecimals={false} tick={{ fontSize: 10 }} />
-              <Tooltip />
-              <Bar dataKey="Phase" stackId="a" fill="#1d70b8" />
-              <Bar dataKey="Field" stackId="a" fill="#f47738" />
-            </BarChart>
-          </ResponsiveContainer>
-        </div>
-      </div>
-    )
-  }
-
   let breakdown, sevData
   if (cfg.fieldTab) {
     const byField = {}
@@ -637,8 +553,21 @@ function Charts({ tab, data }) {
     const sevCounts = { Critical: 0, High: 0, Medium: 0, Low: 0 }
     data.cr.forEach(f => { if (sevCounts[f.severity] !== undefined) sevCounts[f.severity]++ })
     sevData = Object.entries(sevCounts).map(([name, value]) => ({ name, value }))
+  } else if (cfg.outcomeCombined) {
+    const phaseRows = getOutcomePhaseRows(data)
+    const byReason = {}
+    phaseRows.filter(r => r.reason).forEach(r => { byReason[r.reason] = (byReason[r.reason] || 0) + 1 })
+    data.outcomeFields.filter(f => f.field).forEach(f => {
+      const label = `Field: ${f.field}`
+      byReason[label] = (byReason[label] || 0) + 1
+    })
+    breakdown = Object.entries(byReason).map(([name, value]) => ({ name, value }))
+    const sevCounts = { Critical: 0, High: 0, Medium: 0, Low: 0 }
+    phaseRows.forEach(r => { if (r.severity && sevCounts[r.severity] !== undefined) sevCounts[r.severity]++ })
+    data.outcomeFields.forEach(f => { if (sevCounts[f.severity] !== undefined) sevCounts[f.severity]++ })
+    sevData = Object.entries(sevCounts).map(([name, value]) => ({ name, value }))
   } else {
-    const rows = data[tab].map(cfg.getRows)
+    const rows = (cfg.combined ? data.epic : data[tab]).map(cfg.getRows)
     const byReason = {}
     rows.forEach(r => { byReason[r.reason] = (byReason[r.reason] || 0) + 1 })
     breakdown = Object.entries(byReason).map(([name, value]) => ({ name, value }))
@@ -674,7 +603,16 @@ function Charts({ tab, data }) {
   )
 }
 
-function PhaseTable({ cfg, rows, reasonFilter, sevFilter, sortAsc, setSortAsc, expandedKey, setExpandedKey, onResolve, onDraft, onStatusChange, statusChange, onApplyStatus, onSelectTransition, onCloseStatus, title, jiraBase, summaries = {}, scrumTeams = {}, scrumTeamFilter = 'all', onTitleClick }) {
+function SectionToggle({ isCollapsed, onToggleCollapse }) {
+  if (!onToggleCollapse) return null
+  return (
+    <button type="button" className="btn-header" onClick={onToggleCollapse}>
+      {isCollapsed ? 'Expand' : 'Collapse'}
+    </button>
+  )
+}
+
+function PhaseTable({ cfg, rows, reasonFilter, sevFilter, sortAsc, setSortAsc, expandedKey, setExpandedKey, onResolve, onDraft, onStatusChange, statusChange, onApplyStatus, onSelectTransition, onCloseStatus, title, jiraBase, summaries = {}, scrumTeams = {}, scrumTeamFilter = 'all', onTitleClick, isCollapsed = false, onToggleCollapse = null }) {
   let filtered = rows.map(cfg.getRows)
     .filter(r => (reasonFilter === 'all' || r.reason === reasonFilter) && (sevFilter === 'all' || r.severity === sevFilter))
     .filter(r => scrumTeamFilter === 'all' || scrumTeams[r.leftKey] === scrumTeamFilter || scrumTeams[r.rightKey] === scrumTeamFilter)
@@ -688,8 +626,11 @@ function PhaseTable({ cfg, rows, reasonFilter, sevFilter, sortAsc, setSortAsc, e
 
   return (
     <div className="table-wrap">
-      <div className="table-header"><p>{title}</p></div>
-      <table>
+      <div className="table-header" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
+        <p>{title}</p>
+        <SectionToggle isCollapsed={isCollapsed} onToggleCollapse={onToggleCollapse} />
+      </div>
+      {!isCollapsed && <table>
         <colgroup>{cfg.columns.map((_, i) => <col key={i} style={{ width: (cfg.hasActions ? [12, 16, 12, 16, 24, 12] : [14, 16, 14, 16, 26, 14])[i] + '%' }} />)}{cfg.hasActions && <col style={{ width: '8%' }} />}<col style={{ width: '4%' }} /></colgroup>
         <thead>
           <tr>
@@ -777,13 +718,13 @@ function PhaseTable({ cfg, rows, reasonFilter, sevFilter, sortAsc, setSortAsc, e
             )
           })}
         </tbody>
-      </table>
-      <Pagination page={page} setPage={setPage} totalItems={filtered.length} />
+      </table>}
+      {!isCollapsed && <Pagination page={page} setPage={setPage} totalItems={filtered.length} />}
     </div>
   )
 }
 
-function FieldTable({ findings, reasonFilter, sevFilter, entityType, expandedKey, setExpandedKey, onDraft, fieldCache, onSaved, title, jiraBase, summaries = {}, scrumTeams = {}, scrumTeamFilter = 'all', onTitleClick }) {
+function FieldTable({ findings, reasonFilter, sevFilter, entityType, expandedKey, setExpandedKey, onDraft, fieldCache, onSaved, title, jiraBase, summaries = {}, scrumTeams = {}, scrumTeamFilter = 'all', onTitleClick, isCollapsed = false, onToggleCollapse = null }) {
   const filtered = findings
     .filter(f => (reasonFilter === 'all' || f.field === reasonFilter) && (sevFilter === 'all' || f.severity === sevFilter))
     .filter(f => scrumTeamFilter === 'all' || scrumTeams[f.entity_key] === scrumTeamFilter)
@@ -804,8 +745,11 @@ function FieldTable({ findings, reasonFilter, sevFilter, entityType, expandedKey
 
   return (
     <div className="table-wrap">
-      <div className="table-header"><p>{title}</p></div>
-      <table>
+      <div className="table-header" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
+        <p>{title}</p>
+        <SectionToggle isCollapsed={isCollapsed} onToggleCollapse={onToggleCollapse} />
+      </div>
+      {!isCollapsed && <table>
         <colgroup><col style={{ width: '16%' }} /><col style={{ width: '18%' }} /><col style={{ width: '12%' }} /><col style={{ width: '26%' }} /><col style={{ width: '20%' }} /><col style={{ width: '8%' }} /></colgroup>
         <thead><tr><th>{entityLabel}</th><th>Status</th><th>Severity</th><th>Issues</th><th>Actions</th><th></th></tr></thead>
         <tbody>
@@ -830,8 +774,8 @@ function FieldTable({ findings, reasonFilter, sevFilter, entityType, expandedKey
             )
           })}
         </tbody>
-      </table>
-      <Pagination page={page} setPage={setPage} totalItems={groupList.length} />
+      </table>}
+      {!isCollapsed && <Pagination page={page} setPage={setPage} totalItems={groupList.length} />}
     </div>
   )
 }

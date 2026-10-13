@@ -100,24 +100,6 @@ def init_db():
             updated_at REAL
         )
     """)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS issue_status_snapshot (
-            issue_key TEXT PRIMARY KEY,
-            entity_type TEXT,
-            status TEXT,
-            jira_updated_at TEXT,
-            assignee TEXT,
-            checked_at REAL
-        )
-    """)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS scan_totals (
-            run_id TEXT,
-            category TEXT,
-            total INTEGER,
-            PRIMARY KEY (run_id, category)
-        )
-    """)
     conn.execute("CREATE INDEX IF NOT EXISTS idx_field_findings_run ON field_findings(run_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_checks_run ON checks(run_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_checks_story_cr ON checks(story_key, cr_key)")
@@ -129,13 +111,6 @@ def init_db():
     existing_cols = [row[1] for row in conn.execute("PRAGMA table_info(checks)").fetchall()]
     if "pair_type" not in existing_cols:
         conn.execute("ALTER TABLE checks ADD COLUMN pair_type TEXT DEFAULT 'cr_story'")
-
-    # Same reasoning: issue_status_snapshot existed before 'assignee' was
-    # added to it - CREATE TABLE IF NOT EXISTS won't retrofit the column
-    # onto an already-existing table.
-    snapshot_cols = [row[1] for row in conn.execute("PRAGMA table_info(issue_status_snapshot)").fetchall()]
-    if "assignee" not in snapshot_cols:
-        conn.execute("ALTER TABLE issue_status_snapshot ADD COLUMN assignee TEXT")
 
     conn.commit()
     conn.close()
@@ -233,11 +208,18 @@ def save_additional_checks(run_id, results, pair_type):
     conn.close()
 
 
-def get_pair_findings(run_id, pair_type):
+def get_pair_findings(run_id, pair_type, include_compliant=False):
     conn = get_conn()
-    rows = conn.execute(
-        "SELECT * FROM checks WHERE run_id = ? AND pair_type = ? AND compliant = 0", (run_id, pair_type)
-    ).fetchall()
+    if include_compliant:
+        rows = conn.execute(
+            "SELECT * FROM checks WHERE run_id = ? AND pair_type = ?",
+            (run_id, pair_type),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT * FROM checks WHERE run_id = ? AND pair_type = ? AND compliant = 0",
+            (run_id, pair_type),
+        ).fetchall()
     conn.close()
     return [dict(r) for r in rows]
 
@@ -589,112 +571,18 @@ def get_issue_scrum_teams(keys=None):
     return {r["issue_key"]: r["scrum_team"] for r in rows}
 
 
-def save_scan_totals(run_id, totals):
-    """totals: dict of {category: count}, e.g. {'cr': 51, 'epic': 14,
-    'outcome': 8}. These are entity DISCOVERY counts from the scan —
-    used as the denominator for a real compliance rate, since
-    field_findings only ever stores entities with at least one issue
-    (a fully-compliant entity never appears there at all, so its total
-    population has to come from here instead)."""
-    if not totals:
-        return
+def clear_all_scan_data():
+    """Delete ALL scan runs and results (checks, field_findings) to start fresh.
+    Preserves status_mappings and resolutions as they represent learned/human state.
+    Called at the start of each scan to ensure fresh data without duplicates."""
     conn = get_conn()
-    for category, total in totals.items():
-        conn.execute(
-            "INSERT OR REPLACE INTO scan_totals (run_id, category, total) VALUES (?, ?, ?)",
-            (run_id, category, total),
-        )
-    conn.commit()
+    # Get all run IDs
+    all_run_ids = [r[0] for r in conn.execute("SELECT run_id FROM runs")]
+    if all_run_ids:
+        placeholders = ",".join("?" * len(all_run_ids))
+        conn.execute(f"DELETE FROM checks WHERE run_id IN ({placeholders})", all_run_ids)
+        conn.execute(f"DELETE FROM field_findings WHERE run_id IN ({placeholders})", all_run_ids)
+        conn.execute(f"DELETE FROM runs WHERE run_id IN ({placeholders})", all_run_ids)
+        conn.commit()
     conn.close()
-
-
-def get_latest_scan_totals():
-    """Returns {category: total} for the most recent run that has any
-    scan_totals rows."""
-    run_id = latest_run_id()
-    if not run_id:
-        return {}
-    conn = get_conn()
-    rows = conn.execute("SELECT category, total FROM scan_totals WHERE run_id = ?", (run_id,)).fetchall()
-    conn.close()
-    return {r["category"]: r["total"] for r in rows}
-
-
-def get_pair_counts(run_id, pair_type):
-    """Total checked vs non-compliant for one pair_type, bypassing
-    get_pair_findings()'s compliant=0 restriction — the checks table
-    already has both, this just counts rather than fetching full rows.
-    Returns {'total': N, 'non_compliant': M}."""
-    conn = get_conn()
-    total = conn.execute(
-        "SELECT COUNT(*) AS c FROM checks WHERE run_id = ? AND pair_type = ?", (run_id, pair_type)
-    ).fetchone()["c"]
-    non_compliant = conn.execute(
-        "SELECT COUNT(*) AS c FROM checks WHERE run_id = ? AND pair_type = ? AND compliant = 0", (run_id, pair_type)
-    ).fetchone()["c"]
-    conn.close()
-    return {"total": total, "non_compliant": non_compliant}
-
-
-def save_issue_status_snapshot(snapshot):
-    """snapshot: dict of {issue_key: {"entity_type":..., "status":...,
-    "jira_updated_at":..., "assignee":...}}. Bulk upsert, once per scan —
-    captures Jira's OWN 'updated' timestamp (already present on every
-    issue, no new Jira-side tracking needed) so staleness/blocked
-    detection works without requiring separate status-change-history
-    tracking, plus assignee for per-person capacity views."""
-    if not snapshot:
-        return
-    now = time.time()
-    conn = get_conn()
-    for key, info in snapshot.items():
-        if not key:
-            continue
-        conn.execute(
-            """INSERT OR REPLACE INTO issue_status_snapshot
-               (issue_key, entity_type, status, jira_updated_at, assignee, checked_at)
-               VALUES (?, ?, ?, ?, ?, ?)""",
-            (key, info.get("entity_type"), info.get("status"), info.get("jira_updated_at"), info.get("assignee"), now),
-        )
-    conn.commit()
-    conn.close()
-
-
-def get_issue_status_snapshot():
-    """Returns list of {issue_key, entity_type, status, jira_updated_at,
-    checked_at} for every currently-tracked issue."""
-    conn = get_conn()
-    rows = conn.execute("SELECT * FROM issue_status_snapshot").fetchall()
-    conn.close()
-    return [dict(r) for r in rows]
-
-
-def get_team_compliance_snapshot(run_id):
-    """Per Scrum Team: total checks and non-compliant count, across
-    ALL pair types (epic_cr, story_outcome, outcome_epic, cr_story) —
-    joins the checks table against issue_scrum_teams via each row's
-    DEPENDENT-side key. Which column holds the dependent entity is
-    NOT consistent across pair types: cr_story/epic_cr/story_outcome
-    all use story_key, but outcome_epic uniquely stores its dependent
-    (the bottleneck Epic) in cr_key instead — confirmed directly
-    against the scan code, not assumed. Returns
-    {team_name: {"total": N, "non_compliant": M}}."""
-    conn = get_conn()
-    rows = conn.execute(
-        "SELECT pair_type, cr_key, story_key, compliant FROM checks WHERE run_id = ?", (run_id,)
-    ).fetchall()
-    team_by_key = {r["issue_key"]: r["scrum_team"] for r in
-                   conn.execute("SELECT issue_key, scrum_team FROM issue_scrum_teams").fetchall()}
-    conn.close()
-
-    teams = {}
-    for row in rows:
-        dependent_key = row["cr_key"] if row["pair_type"] == "outcome_epic" else row["story_key"]
-        team = team_by_key.get(dependent_key)
-        if not team:
-            continue
-        teams.setdefault(team, {"total": 0, "non_compliant": 0})
-        teams[team]["total"] += 1
-        if not row["compliant"]:
-            teams[team]["non_compliant"] += 1
-    return teams
+    return {"cleared_runs": len(all_run_ids)}
