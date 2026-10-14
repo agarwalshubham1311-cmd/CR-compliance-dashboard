@@ -1,0 +1,244 @@
+{
+  "rules": [
+    {
+      "key": "status_mismatches",
+      "label": "Status mismatch with child",
+      "description": "Detects when Outcome, Epic, CR or Story progression is not aligned with dependent work items.",
+      "metric_key": "status_mismatches",
+      "severity": "High",
+      "enabled": true,
+      "source": "scan"
+    },
+    {
+      "key": "field_gaps",
+      "label": "Field missing / invalid",
+      "description": "Highlights mandatory or time-sensitive field gaps across Outcome, Epic and CR work items.",
+      "metric_key": "field_gaps",
+      "severity": "Medium",
+      "enabled": true,
+      "source": "scan"
+    },
+    {
+      "key": "broken_hierarchy_links",
+      "label": "Broken hierarchy link",
+      "description": "Surfaces bottleneck misalignment across Outcome \u2192 Epic \u2192 CR relationships.",
+      "metric_key": "broken_hierarchy_links",
+      "severity": "High",
+      "enabled": true,
+      "source": "scan"
+    },
+    {
+      "key": "pr_missing_against_cr",
+      "label": "PR missing against CR",
+      "description": "Reserved rule for PR / Slot evidence gaps against CRs. Scaffolded now so the UI does not need to change when SCM data is added.",
+      "metric_key": "pr_missing_against_cr",
+      "severity": "Low",
+      "enabled": true,
+      "source": "derived"
+    }
+  ],
+  "fields": {
+    "outcome": [
+      {
+        "key": "target_delivery_date",
+        "label": "Target Delivery Date",
+        "visible": true,
+        "required": true,
+        "editable": true
+      },
+      {
+        "key": "rag_status",
+        "label": "RAG Status",
+        "visible": true,
+        "required": true,
+        "editable": true
+      },
+      {
+        "key": "rag_outcome",
+        "label": "RAG Outcome",
+        "visible": true,
+        "required": true,
+        "editable": true
+      },
+      {
+        "key": "go_live_date",
+        "label": "Go Live Date",
+        "visible": true,
+        "required": true,
+        "editable": true
+      }
+    ],
+    "epic": [
+      {
+        "key": "due_date",
+        "label": "Due Date",
+        "visible": true,
+        "required": true,
+        "editable": true
+      },
+      {
+        "key": "target_delivery_date",
+        "label": "Target Delivery Date",
+        "visible": true,
+        "required": true,
+        "editable": true
+      },
+      {
+        "key": "description",
+        "label": "Description",
+        "visible": true,
+        "required": true,
+        "editable": true
+      },
+      {
+        "key": "labels",
+        "label": "Labels",
+        "visible": true,
+        "required": true,
+        "editable": true
+      },
+      {
+        "key": "priority",
+        "label": "Priority",
+        "visible": true,
+        "required": true,
+        "editable": true
+      },
+      {
+        "key": "pi",
+        "label": "PI",
+        "visible": true,
+        "required": true,
+        "editable": true
+      },
+      {
+        "key": "delivery_data_confidence",
+        "label": "Delivery Data Confidence",
+        "visible": true,
+        "required": true,
+        "editable": true
+      }
+    ],
+    "cr": [
+      {
+        "key": "epic_link",
+        "label": "Epic Link",
+        "visible": true,
+        "required": true,
+        "editable": true
+      },
+      {
+        "key": "complexity",
+        "label": "Complexity",
+        "visible": true,
+        "required": true,
+        "editable": true
+      },
+      {
+        "key": "funded_by",
+        "label": "Funded By",
+        "visible": true,
+        "required": true,
+        "editable": true
+      },
+      {
+        "key": "baseline_target_delivery_date",
+        "label": "Baseline Target Delivery Date",
+        "visible": true,
+        "required": true,
+        "editable": true
+      },
+      {
+        "key": "baseline_prp_date",
+        "label": "Baseline PRP Date",
+        "visible": true,
+        "required": true,
+        "editable": true
+      },
+      {
+        "key": "actual_prp_start_date",
+        "label": "Actual PRP Start Date",
+        "visible": true,
+        "required": true,
+        "editable": true
+      },
+      {
+        "key": "prp_status",
+        "label": "PRP Status",
+        "visible": true,
+        "required": true,
+        "editable": true
+      },
+      {
+        "key": "release_through",
+        "label": "Release Through",
+        "visible": true,
+        "required": true,
+        "editable": true
+      },
+      {
+        "key": "target_delivery_date",
+        "label": "Target Delivery Date",
+        "visible": true,
+        "required": true,
+        "editable": true
+      },
+      {
+        "key": "reason_for_delay",
+        "label": "Reason for Delay",
+        "visible": true,
+        "required": true,
+        "editable": true
+      },
+      {
+        "key": "blocked_by_dependency",
+        "label": "Blocked by/Dependency",
+        "visible": true,
+        "required": true,
+        "editable": true
+      }
+    ],
+    "story": [
+      {
+        "key": "summary",
+        "label": "Summary",
+        "visible": true,
+        "required": true,
+        "editable": false
+      },
+      {
+        "key": "status",
+        "label": "Status",
+        "visible": true,
+        "required": true,
+        "editable": false
+      },
+      {
+        "key": "labels",
+        "label": "Labels",
+        "visible": true,
+        "required": false,
+        "editable": false
+      },
+      {
+        "key": "assignee",
+        "label": "Assignee",
+        "visible": true,
+        "required": false,
+        "editable": false
+      }
+    ]
+  },
+  "agentic_ai": {
+    "orchestrator": "LangGraph",
+    "reasoning": "LangChain-style prompt orchestration",
+    "retrieval": "RAG guidance for Jira governance and login support",
+    "human_in_the_loop": true
+  },
+  "views": {
+    "default": "landing",
+    "show_agentic_ai": true,
+    "show_quick_actions": true,
+    "show_configuration": true
+  }
+}
