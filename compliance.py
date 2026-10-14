@@ -160,7 +160,7 @@ def _driver_phase(status_type, norm_status):
     the same earliest-phase approach."""
     if status_type == "cr":
         return CR_STATUS_TO_PHASE.get(norm_status)
-    if status_type == "story":
+    if status_type in ("story", "epic"):
         phases = STORY_STATUS_TO_PHASES.get(norm_status)
         return min(phases) if phases else None
     if status_type == "outcome":

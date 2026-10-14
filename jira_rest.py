@@ -1,71 +1,100 @@
 import sys
 import os
 import logging
+import tempfile
+from pathlib import Path
 import requests
+import certifi
+from flask import has_request_context, session
 from requests.auth import HTTPBasicAuth
 
 logger = logging.getLogger(__name__)
 
-# SSL trust setup differs by platform:
-#
-# - Windows (native venv): no easy way to point `requests` at the OS trust
-#   store via an env var, so `truststore` globally patches ssl.SSLContext to
-#   read it directly. Safe here because .py is the main thing using
-#   `requests` heavily in that setup.
-#
-# - Linux (Docker): the corporate CA is already merged into the system bundle
-#   by `update-ca-certificates` at build time (see Dockerfile). We do NOT use
-#   truststore's global monkey-patch here — inside the container, multiple
-#   libraries touch the SSL layer in the same process (requests, httpx/MCP,
-#   Ollama's client), and truststore's patch has been observed to cause
-#   "maximum recursion depth exceeded" in that combination. Pointing
-#   REQUESTS_CA_BUNDLE at the system bundle achieves the same trust result
-#   without any monkey-patching.
-if sys.platform == "win32":
-    try:
-        import truststore
-        truststore.inject_into_ssl()
-    except ImportError:
-        pass  # falls back to REQUESTS_CA_BUNDLE / certifi if truststore isn't installed
-else:
+def _configure_requests_ca_bundle():
+    """Configure requests to trust the repo's corporate CA without
+    monkey-patching ssl.
+
+    The old Windows truststore injection could trigger deep recursion in
+    Python 3.14/urllib3/ssl. Instead, we build a merged CA bundle from
+    certifi + corporate-ca.crt (if present) and point REQUESTS_CA_BUNDLE at
+    it. On Linux/Docker, keep using the system bundle created at build time.
+    """
+    if os.environ.get("REQUESTS_CA_BUNDLE"):
+        return
+
+    if sys.platform == "win32":
+        base_bundle = Path(certifi.where())
+        corporate_ca = Path(__file__).with_name("corporate-ca.crt")
+
+        if corporate_ca.exists():
+            merged_bundle = Path(tempfile.gettempdir()) / "cr-compliance-requests-ca-bundle.pem"
+            try:
+                merged_bundle.write_text(base_bundle.read_text(encoding="utf-8") + "\n" + corporate_ca.read_text(encoding="utf-8"), encoding="utf-8")
+                os.environ["REQUESTS_CA_BUNDLE"] = str(merged_bundle)
+                logger.info("Using merged CA bundle for requests: %s", merged_bundle)
+                return
+            except Exception as e:
+                logger.warning("Could not build merged CA bundle (%s); falling back to certifi bundle", e)
+
+        os.environ["REQUESTS_CA_BUNDLE"] = certifi.where()
+        logger.info("Using certifi CA bundle for requests: %s", certifi.where())
+        return
+
     os.environ.setdefault("REQUESTS_CA_BUNDLE", "/etc/ssl/certs/ca-certificates.crt")
 
-JIRA_URL = os.environ.get("JIRA_URL")
-JIRA_USERNAME = os.environ.get("JIRA_USERNAME")
-JIRA_PASSWORD = os.environ.get("JIRA_PASSWORD")
-JIRA_PASSWORD = os.environ.get("JIRA_PASSWORD")  # optional, only for mcp-atlassian's curated endpoints
+
+_configure_requests_ca_bundle()
+
+
+def _current_creds():
+    if has_request_context():
+        session_auth = session.get("jira_auth") or {}
+        session_url = (session_auth.get("url") or "").strip()
+        session_username = (session_auth.get("username") or "").strip()
+        session_password = session_auth.get("password") or ""
+        if session_url and session_username and session_password:
+            return session_url, session_username, session_password
+
+    return (
+        os.environ.get("JIRA_URL"),
+        os.environ.get("JIRA_USERNAME"),
+        os.environ.get("JIRA_PASSWORD"),
+    )
 
 def get_issue_raw(issue_key):
     """Fetch the full raw issue JSON directly from Jira's REST API —
     bypassing mcp-atlassian's curated field subset — so custom fields
     (Complexity, RAG Status, etc.) are available for compliance checks.
     Raises on missing credentials or a failed request."""
-    _require_creds()
-    url = f"{JIRA_URL.rstrip('/')}/rest/api/2/issue/{issue_key}"
-    resp = requests.get(url, auth=HTTPBasicAuth(JIRA_USERNAME, JIRA_PASSWORD), timeout=30)
+    jira_url, jira_username, jira_password = _require_creds()
+    url = f"{jira_url.rstrip('/')}/rest/api/2/issue/{issue_key}"
+    resp = requests.get(url, auth=HTTPBasicAuth(jira_username, jira_password), timeout=30)
     resp.raise_for_status()
     return resp.json()
 
 
 def _require_creds():
-    if not all([JIRA_URL, JIRA_USERNAME, JIRA_PASSWORD]):
+    jira_url, jira_username, jira_password = _current_creds()
+    if not all([jira_url, jira_username, jira_password]):
         raise RuntimeError(
-            "JIRA_URL / JIRA_USERNAME / JIRA_PASSWORD must be set in the Flask "
-            "app's own environment (not just jira.env for the Docker container) "
-            "for direct field access to work."
+            "Jira credentials are not available for direct field access. "
+            "Please log in again from the login page so the current Flask session "
+            "has JIRA_URL, JIRA_USERNAME, and JIRA_PASSWORD."
         )
+    return jira_url, jira_username, jira_password
 
 
 def _auth():
-    return HTTPBasicAuth(JIRA_USERNAME, JIRA_PASSWORD)
+    _, jira_username, jira_password = _require_creds()
+    return HTTPBasicAuth(jira_username, jira_password)
 
 
 def get_available_transitions(issue_key):
     """Returns the list of statuses this issue can ACTUALLY move to right
     now, per Jira's own workflow — never a hardcoded guess. Each entry:
     {"id": "...", "name": "...", "to_status": "..."}"""
-    _require_creds()
-    url = f"{JIRA_URL.rstrip('/')}/rest/api/2/issue/{issue_key}/transitions"
+    jira_url, _, _ = _require_creds()
+    url = f"{jira_url.rstrip('/')}/rest/api/2/issue/{issue_key}/transitions"
     resp = requests.get(url, auth=_auth(), timeout=30)
     resp.raise_for_status()
     transitions = resp.json().get("transitions", [])
@@ -80,8 +109,8 @@ def transition_issue(issue_key, transition_id):
     by status name directly, since Jira requires the specific transition
     ID, and validating against the real available list prevents silently
     failed or wrong-workflow writes."""
-    _require_creds()
-    url = f"{JIRA_URL.rstrip('/')}/rest/api/2/issue/{issue_key}/transitions"
+    jira_url, _, _ = _require_creds()
+    url = f"{jira_url.rstrip('/')}/rest/api/2/issue/{issue_key}/transitions"
     resp = requests.post(url, json={"transition": {"id": transition_id}}, auth=_auth(), timeout=30)
     resp.raise_for_status()
     return {"success": True}
@@ -92,8 +121,8 @@ def update_issue_fields(issue_key, fields_payload):
     for Jira's REST API (see field_rules.format_field_value) — e.g. a
     select-type field needs {"value": "High"}, plain text/dates are the
     raw value, labels are a list."""
-    _require_creds()
-    url = f"{JIRA_URL.rstrip('/')}/rest/api/2/issue/{issue_key}"
+    jira_url, _, _ = _require_creds()
+    url = f"{jira_url.rstrip('/')}/rest/api/2/issue/{issue_key}"
     resp = requests.put(url, json={"fields": fields_payload}, auth=_auth(), timeout=30)
     if not resp.ok:
         # Jira's error body has the actual reason (which field, why) —
@@ -113,9 +142,9 @@ def update_issue_fields(issue_key, fields_payload):
     return {"success": True}
 def get_projects():
     """Return only Jira projects whose key starts with ACC."""
-    _require_creds()
+    jira_url, _, _ = _require_creds()
 
-    url = f"{JIRA_URL.rstrip('/')}/rest/api/2/project"
+    url = f"{jira_url.rstrip('/')}/rest/api/2/project"
     projects = []
     start_at = 0
 
@@ -189,8 +218,8 @@ def get_projects():
 def get_projects11():
     """Every Jira project these credentials can see. Jira Data Center returns
     a JSON array directly, while Cloud returns a paginated response with values."""
-    _require_creds()
-    url = f"{JIRA_URL.rstrip('/')}/rest/api/2/project"
+    jira_url, _, _ = _require_creds()
+    url = f"{jira_url.rstrip('/')}/rest/api/2/project"
     projects, start_at = [], 0
     while True:
         try:
@@ -229,8 +258,8 @@ def get_boards(project_key=None):
     everywhere else in this file — a board isn't a JQL-queryable concept,
     it's tied to a filter configured on the board itself.
     Handles both Jira Data Center (direct array) and Cloud (paginated) responses."""
-    _require_creds()
-    url = f"{JIRA_URL.rstrip('/')}/rest/agile/1.0/board"
+    jira_url, _, _ = _require_creds()
+    url = f"{jira_url.rstrip('/')}/rest/agile/1.0/board"
     params = {"maxResults": 50}
     if project_key:
         params["projectKeyOrId"] = project_key
@@ -292,8 +321,8 @@ def search_board_issues(board_id, jql=None, max_pages=50):
     different pagination style than mcp-atlassian's page_token, since
     this is a different API family). Returns issues already normalized
     to match the rest of the scan code's expected shape."""
-    _require_creds()
-    url = f"{JIRA_URL.rstrip('/')}/rest/agile/1.0/board/{board_id}/issue"
+    jira_url, _, _ = _require_creds()
+    url = f"{jira_url.rstrip('/')}/rest/agile/1.0/board/{board_id}/issue"
     params = {"maxResults": 50}
     if jql:
         params["jql"] = jql

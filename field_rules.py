@@ -30,12 +30,12 @@ OUTCOME_FIELDS = {
 }
 
 EPIC_FIELDS = {
-    "due_date": "duedate",
+    "due_date": "customfield_12113",
     "target_delivery_date": "customfield_18103",  # Epic's OWN field — distinct from CR/Outcome's customfield_10112
     "description": "description",
     "labels": "labels",
     "priority": "priority",
-    "pi": "customfield_10183",
+    "pi": "customfield_21699",
     "delivery_data_confidence": "customfield_21663",
 }
 
